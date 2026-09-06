@@ -1,0 +1,37 @@
+﻿# ============================================================================
+# myTraxCure 依赖清单（基于 eyetrax 0.4.0 实测环境）
+# 安装：venv\Scripts\python.exe -m pip install -r requirements.txt
+# ============================================================================
+
+# ---- 眼动核心（当前 venv 已安装） -----------------------------------------
+eyetrax==0.4.0
+mediapipe==1.0.1
+numpy==1.26.4              # 注意：eyetrax 与 NumPy 2.x 冲突，必须 <2
+opencv-python>=4.10        # eyetrax 内部用 cv2.KalmanFilter
+scikit-learn>=1.4
+scipy>=1.11
+screeninfo>=0.8
+matplotlib>=3.8
+sounddevice>=0.5           # eyetrax app 依赖，可留
+pyvirtualcam>=0.15         # eyetrax virtualcam 用，可选
+
+# ---- GUI -------------------------------------------------------------------
+PyQt6>=6.6
+
+# ---- 文件处理 -------------------------------------------------------------
+PyMuPDF>=1.24              # PDF 文本层 / 渲染
+python-docx>=1.1           # Word 读取（也可转 PDF 再解析）
+
+# ---- OCR -------------------------------------------------------------------
+# 注意：PaddleOCR / PaddlePaddle 对 Python 3.12 的兼容性需自行确认，
+# 可能需要更低的 Python 版本或特定 paddlepaddle 版本。
+paddleocr>=2.7
+paddlepaddle>=2.6
+
+# ---- 翻译 -------------------------------------------------------------------
+ollama>=0.3                # 官方 Python 客户端（也可直接用 requests 调 HTTP）
+requests>=2.31
+
+# ---- 可选：内置模型后端（后期启用） ---------------------------------------
+# transformers>=4.40
+# torch>=2.2

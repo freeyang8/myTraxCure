@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mytraxcure"
+version = "0.1.0"
+description = "基于 eyetrax 的眼动翻译桌面软件（毕业设计）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "eyetrax==0.4.0",
+    "mediapipe==1.0.1",
+    "numpy==1.26.4",
+    "opencv-python>=4.10",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+    "screeninfo>=0.8",
+    "PyQt6>=6.6",
+    "PyMuPDF>=1.24",
+    "python-docx>=1.1",
+    "ollama>=0.3",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+ocr = ["paddleocr>=2.7", "paddlepaddle>=2.6"]
+builtin = ["transformers>=4.40", "torch>=2.2"]
+
+[project.scripts]
+mytraxcure = "mytraxcure.app:run"
+
+[tool.setuptools]
+packages = { find = { include = ["mytraxcure*"] } }
+
+[tool.setuptools.package-data]
+mytraxcure = ["py.typed"]
+
+# 静态类型检查配置：本项目以功能实现为主，未做全量类型标注。
+# 关闭与 PyQt6 stub 相关的严格告警（IDE 红色波浪线），避免淹没真实问题。
+[tool.basedpyright]
+typeCheckingMode = "basic"
+reportOptionalMemberAccess = false       # statusBar()/menuBar() 等 Optional 返回值访问
+reportIncompatibleMethodOverride = false # 覆写方法参数命名与 Qt stub 不一致（a0 vs event）
+reportMissingTypeArgument = false        # np.ndarray 泛型参数
+reportUnusedCallResult = false           # connect() 等调用未接收返回值
+reportArgumentType = false               # GazeWrapper | None 传给非空形参（代码已判空）
+reportAssignmentType = false             # QStatusBar | None 赋给 QStatusBar 变量
+reportAttributeAccessIssue = false       # 动态属性（如 kf / tune）访问
+reportPrivateUsage = false               # 跨模块访问 _blocks 等下划线成员
+reportImplicitOverride = false           # 覆写未加 @override 装饰器
+reportUnknownMemberType = false          # 第三方库缺类型存根
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportMissingParameterType = false
+reportMissingTypeAttribute = false
+reportAny = false
+
+[tool.ruff.lint]
+# 降级容错必须捕获宽异常：摄像头/模型/网络不可用时都要兜住并降级鼠标模式
+ignore = ["BLE001"]

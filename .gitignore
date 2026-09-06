@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 运行时生成的数据
+data/cache.db
+data/cache.db-*
+data/calibration/*.pkl
+data/uploads/*
+!data/uploads/.gitkeep
+!data/calibration/.gitkeep
+
+# 本地配置
+config.local.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+
+_resume_build/
+
+
+issues.txt
+
+.codebuddy/
+
+
+# 本地资料，不上传
+data/
+_dump_project_to_txt.py
+项目源码汇总.txt
+毕业项目需求v6.md
+tests/
+.gitignore
