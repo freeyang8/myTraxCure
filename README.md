@@ -71,12 +71,15 @@ python -m mytraxcure
 ```
 ### 使用说明
 > 首次启动会开启9点校准，以及收集降噪数据，且启动时间较长；若摄像头不可用，程序会自动降级为鼠标模式。OCR 与内置模型后端为可选依赖，详见 `pyproject.toml` 中的 `[project.optional-dependencies]`。
+>蓝框锁定段落后点击空格即可翻译
 
 #### 模型配置
-mytraxcure/core/config.py中TranslationConfig的变量和本地模型一致 
-    model: str
-    ollama_url: str
+`mytraxcure/core/config.py` 中的 `TranslationConfig` 类包含以下配置项：
 
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `model` | `str` | 使用的翻译模型名称（需与本地Ollama模型一致） |
+| `ollama_url` | `str` | Ollama服务的API地址（默认：http://localhost:11434） |
 
 
 #### 验证连接
