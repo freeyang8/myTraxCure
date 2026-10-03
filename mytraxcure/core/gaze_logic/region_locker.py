@@ -12,32 +12,17 @@ class RegionLocker:
     def lock(
         self,
         point: GazePoint,
-        calibration_error_px: float | None = None,
-        zoom: float = 1.0,
         bounds: tuple[int, int, int, int] | None = None,
     ) -> Region:
-        if zoom <= 0:
-            raise ValueError(f"zoom 必须为正数，当前 {zoom}")
         cfg = self.config  #获取配置对象
 
-        #基础尺寸随缩放调整
-        w = cfg.default_width/zoom
-        h = cfg.default_height/zoom
-        
-        #自适应模式开启 + 有校准误差数据
-        if cfg.adaptive and calibration_error_px is not None and calibration_error_px > 0:
-            w += 2*calibration_error_px
-            h += 2*calibration_error_px
+        #基础尺寸
+        w = cfg.default_width
+        h = cfg.default_height
 
-        #限制矩形尺寸在 [min, max]
-        w = min(
-            max(w,cfg.min_width),
-            cfg.max_width
-        )
-        h = min(
-            max(h, cfg.min_height), 
-            cfg.max_height
-        )
+        #限制矩形尺寸不超过上限
+        w = min(w, cfg.max_width)
+        h = min(h, cfg.max_height)
 
         #以凝视点为中心定位,实现居中锁定，用户看哪里，矩形中心就在哪里
         x = point.x - w /2

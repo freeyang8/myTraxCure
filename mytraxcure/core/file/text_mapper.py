@@ -11,8 +11,6 @@ class ViewportState:
     #必须是元组且有两个int类型
     window_origin: tuple[int, int] = (0, 0)  # 窗口左上在屏幕逻辑坐标中的位置
     scroll_offset: tuple[int, int] = (0, 0)  # 视口滚动偏移（逻辑像素），屏幕当前滚动到了哪里
-    zoom: float = 1.0 
-    dpi_scale: float = 1.0  # 物理/逻辑像素比，屏幕上每英寸长度内能显示多少个像素点
     current_page: int = 0  # 当前可见页；分页文档只在本页内做命中与聚合
 
 class TextMapper:
@@ -44,18 +42,12 @@ class TextMapper:
         self,
         window_origin: tuple[int, int] | None = None,
         scroll_offset: tuple[int, int] | None = None,
-        zoom: float | None = None,
-        dpi_scale: float | None = None,
         current_page: int | None = None
     ) -> None:
         if window_origin is not None:
             self._viewport.window_origin = window_origin
         if scroll_offset is not None:
             self._viewport.scroll_offset = scroll_offset
-        if zoom is not None:
-            self._viewport.zoom = zoom
-        if dpi_scale is not None:
-            self._viewport.dpi_scale = dpi_scale
         #翻页：命中范围与段落聚合都按页隔离，缓存必须失效
         if current_page is not None and current_page != self._viewport.current_page:
             self._viewport.current_page = current_page
@@ -71,21 +63,16 @@ class TextMapper:
         wy = sy - vp.window_origin[1]
 
         #鼠标在窗口内的位置 + 当前滚动的偏移量 = 鼠标在原始文档里的坐标
-        vx = wx + vp.scroll_offset[0]
-        vy = wy + vp.scroll_offset[1]
-
-        if vp.zoom <= 0:
-            raise ValueError (f"zoom 必须为正数，当前 {vp.zoom}")
-        dx = vx / vp.zoom
-        dy = vy / vp.zoom
+        dx = wx + vp.scroll_offset[0]
+        dy = wy + vp.scroll_offset[1]
         return (dx,dy)
 
     # 文档坐标 → 屏幕逻辑坐标（段落高亮矩形定位，需求 6.2 反向链路）
     def document_to_screen(self, doc_point: tuple[float, float]) -> tuple[float, float]:
         dx, dy = doc_point
         vp = self._viewport
-        sx = dx * vp.zoom - vp.scroll_offset[0] + vp.window_origin[0]
-        sy = dy * vp.zoom - vp.scroll_offset[1] + vp.window_origin[1]
+        sx = dx - vp.scroll_offset[0] + vp.window_origin[0]
+        sy = dy - vp.scroll_offset[1] + vp.window_origin[1]
         return (sx, sy)
 
     #命中测试,鼠标点击后，拿文档坐标，在文本块列表里查命中
@@ -97,12 +84,9 @@ class TextMapper:
         dx, dy = self.screen_to_document(screen_point)
         tol = max(tolerance_px, 0.0)
 
-        # 1. bbox 外膨胀 tolerance 后 contains → 直接命中（后注册的块优先，同原逻辑）
+        # 1. 精确命中（含眼动容差的外膨胀，判定逻辑集中在 TextBlock.contains）
         for block in reversed(self._blocks):
-            if (
-                block.x - tol <= dx <= block.right + tol
-                and block.y - tol <= dy <= block.bottom + tol
-            ):
+            if block.contains(dx, dy, tol):
                 return block
 
         # 2. 回退"最近块"：距离最小且 ≤ tolerance 才承认命中

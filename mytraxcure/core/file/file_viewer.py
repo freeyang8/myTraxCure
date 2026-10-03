@@ -10,21 +10,20 @@ from mytraxcure.core.file.file_parser import ParsedDocument
 if TYPE_CHECKING:
     from mytraxcure.core.file.text_mapper import TextMapper
 
-# TXT 排版基准参数（文档坐标，1.0 基准；不随 zoom 变化）
+# TXT 排版基准参数（文档坐标）
 # 大字号 + 大行高：文本块 bbox 更大，凝视命中/段落选中概率显著提高（眼动输入精度有限）
 _TXT_LINE_HEIGHT = 34      # 行高（像素，需 ≥ 字号 × 1.5，否则行重叠）
 _TXT_MARGIN = 40           # 左右边距（像素）
 _TXT_FONT_SIZE = 20        # 字号（磅）
 _TXT_MIN_PAGE_W = 640      # 最小页面宽度（像素）
 _TXT_MIN_PAGE_H = 400      # 最小页面高度（像素）
-_TXT_WRAP_WIDTH = 960      # 内容最大宽度（像素，1.0 基准；超长行折行）
+_TXT_WRAP_WIDTH = 960      # 内容最大宽度（像素；超长行折行）
 
 class DocumentRenderer:
 
     def __init__(self, document: ParsedDocument) -> None:
         self.document = document
-        self.zoom = 1.0  # 默认缩放比例
-        self._page_cache: dict[tuple[int, float], Any] = {}
+        self._page_cache: dict[int, Any] = {}
         self._fitz_doc: Any = None
         # TXT/Word 回填 bbox 后用于重新注册文本块（需求 6.8.8 前置）
         self._mapper: TextMapper | None = None
@@ -37,7 +36,7 @@ class DocumentRenderer:
         return len(self.document.pages)
 
     # ---- PDF ------------------------------------------------------------
-    def _render_pdf(self, page_index: int, zoom: float) -> np.ndarray:
+    def _render_pdf(self, page_index: int) -> np.ndarray:
         if self._fitz_doc is None:
             import fitz
             self._fitz_doc = fitz.open(self.document.path)
@@ -45,7 +44,6 @@ class DocumentRenderer:
         page = self._fitz_doc[page_index]  # 根据页码取出页面对象
 
         pix = page.get_pixmap(  # 获取图像的截图
-            matrix=fitz.Matrix(zoom, zoom),  # x 和 y 轴各自缩放
             alpha=False,  # 是否生成透明通道 A
         )
 
@@ -60,14 +58,14 @@ class DocumentRenderer:
         return img.copy()
 
     # ---- TXT ------------------------------------------------------------
-    def _render_text_page(self, page_index: int, zoom: float) -> np.ndarray:
+    def _render_text_page(self, page_index: int) -> np.ndarray:
         from PyQt6.QtCore import QRect, Qt
         from PyQt6.QtGui import QFont, QFontMetrics, QImage, QPainter
 
         blocks = [b for b in self.document.blocks if b.page == page_index]
         need_backfill = bool(self.document.meta.get("layout_pending", False))
 
-        # 基准字体 + metrics（1.0）
+        # 基准字体 + metrics
         font = QFont()
         font.setFamilies(["Microsoft YaHei", "SimSun", "Arial"])
         font.setPointSize(_TXT_FONT_SIZE)
@@ -87,38 +85,34 @@ class DocumentRenderer:
             row += len(wrapped)
             prev_li = li
 
-        # 页面基准尺寸（1.0）：宽度固定（超长行已折行），高度按折行后总行数
-        page_w_base = max(_TXT_WRAP_WIDTH + _TXT_MARGIN * 2, _TXT_MIN_PAGE_W)
-        page_h_base = max(row * _TXT_LINE_HEIGHT, _TXT_MIN_PAGE_H)
+        # 页面尺寸：宽度固定（超长行已折行），高度按折行后总行数
+        page_w = max(_TXT_WRAP_WIDTH + _TXT_MARGIN * 2, _TXT_MIN_PAGE_W)
+        page_h = max(row * _TXT_LINE_HEIGHT, _TXT_MIN_PAGE_H)
 
-        # 按 zoom 缩放绘制到白底 QImage
-        img_w = round(page_w_base * zoom)
-        img_h = round(page_h_base * zoom)
-        qimg = QImage(img_w, img_h, QImage.Format.Format_RGB888)
+        # 绘制到白底 QImage
+        qimg = QImage(page_w, page_h, QImage.Format.Format_RGB888)
         qimg.fill(Qt.GlobalColor.white)
 
         painter = QPainter(qimg)
-        draw_font = QFont(font)
-        draw_font.setPointSizeF(_TXT_FONT_SIZE * zoom)
-        painter.setFont(draw_font)
+        painter.setFont(font)
         painter.setPen(Qt.GlobalColor.black)
 
         for b, start_row, wrapped in layout:
-            # 画图坐标（按 zoom）：行位 × 行高 × zoom，逐视觉行绘制
+            # 画图坐标：行位 × 行高，逐视觉行绘制
             for k, line in enumerate(wrapped):
-                px = _TXT_MARGIN * zoom
-                py = (start_row + k) * _TXT_LINE_HEIGHT * zoom
+                px = _TXT_MARGIN
+                py = (start_row + k) * _TXT_LINE_HEIGHT
                 painter.drawText(
                     QRect(
                         int(px),
                         int(py),
-                        int(_TXT_WRAP_WIDTH * zoom),
-                        int(_TXT_LINE_HEIGHT * zoom),
+                        _TXT_WRAP_WIDTH,
+                        _TXT_LINE_HEIGHT,
                     ),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                     line,
                 )
-            # 回填文档坐标（1.0 基准，与 zoom 无关）：bbox 覆盖整个折行段
+            # 回填文档坐标：bbox 覆盖整个折行段
             if need_backfill:
                 b.x = float(_TXT_MARGIN)
                 b.y = float(start_row * _TXT_LINE_HEIGHT)
@@ -133,7 +127,7 @@ class DocumentRenderer:
             if self._mapper is not None:
                 self._mapper.register_blocks(self.document.blocks)
 
-        return self._qimage_to_rgb_array(qimg, img_w, img_h)
+        return self._qimage_to_rgb_array(qimg, page_w, page_h)
 
     # ---- 工具 -----------------------------------------------------------
     @staticmethod
@@ -185,25 +179,20 @@ class DocumentRenderer:
         return arr.copy()
 
     # ---- 对外 -----------------------------------------------------------
-    def render_page(self, page_index: int, zoom: float | None = None) -> np.ndarray:
-        if zoom is None:
-            zoom = self.zoom
-        key = (page_index, round(zoom, 2))  # round->保留小数位数
+    def render_page(self, page_index: int) -> np.ndarray:
+        key = page_index
         if key in self._page_cache:
             return self._page_cache[key]
 
         kind = self.document.kind.upper()
         if kind == "PDF":
-            img = self._render_pdf(page_index, zoom)
+            img = self._render_pdf(page_index)
         elif kind == "TXT":
-            img = self._render_text_page(page_index, zoom)
+            img = self._render_text_page(page_index)
         else:
             raise ValueError(f"暂不支持渲染 {kind} 类型（本项目仅支持 PDF / Word / TXT）")
         self._page_cache[key] = img
         return img
-
-    def set_zoom(self, zoom: float) -> None:
-        self.zoom = zoom
 
     def invalidate_cache(self) -> None:
         self._page_cache.clear()

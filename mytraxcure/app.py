@@ -24,12 +24,19 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("myTraxCure")
 
-    config = ConfigManager().load()
+    config_manager = ConfigManager()
+    config = config_manager.load()
     window = MainWindow(config)
+    # 调参时一眼确认配置来源（状态栏消息后续会被校准提示覆盖，故用标题栏，持久可见）
+    if config_manager.last_source != "file":
+        window.setWindowTitle("myTraxCure [默认配置]")
+
     if outcome is CalibrationOutcome.FALLBACK:
         window.statusBar().showMessage("未校准：已降级为鼠标模式（重启可重新校准）")
+    
     window.resize(1280, 720)
     window.show()
+    
     # 启动默认进入眼动模式；FALLBACK（无可用校准）保持鼠标降级。
     # 本次启动刚完成 9 点校准（NEWLY_CALIBRATED）→ 进眼动前先收集噪声微调滤波
     if outcome is not CalibrationOutcome.FALLBACK:
@@ -38,6 +45,3 @@ def run() -> int:
         )
 
     return app.exec()
-
-if __name__ == "__main__":
-    raise SystemExit(run())

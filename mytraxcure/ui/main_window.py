@@ -33,6 +33,7 @@ from mytraxcure.core.gaze.startup_calibration import run_and_save
 from mytraxcure.core.gaze_logic.gaze_detector import GazeDetector
 from mytraxcure.core.gaze_logic.region_locker import RegionLocker
 from mytraxcure.core.translation.cache_store import CacheKey, CacheStore
+from mytraxcure.core.translation.engine_factory import create_engine
 from mytraxcure.core.translation.translation_engine import (
     TranslationEngine,
     TranslationResult,
@@ -253,10 +254,7 @@ class MainWindow(QMainWindow):
             self._enable_mouse_mode()
             return
         self._gaze_wrapper = wrapper
-        self._smoother = SmootherAdapter(
-            self.config.gaze.smoother,
-            ema_alpha=self.config.gaze.ema_alpha,
-        )
+        self._smoother = SmootherAdapter(ema_alpha=self.config.gaze.ema_alpha)
 
         #准备校准环境
         sw,sh = get_screen_size()  # eyetrax 物理分辨率：仅用于 env 三元组命名/校准，勿用于 Qt 坐标
@@ -484,8 +482,6 @@ class MainWindow(QMainWindow):
             )
             region = self.locker.lock(
                 local_point,
-                calibration_error_px=None,
-                zoom=1.0,  # v6.2：不做缩放，视口缩放恒为 1.0
                 bounds=bounds,
             )
 
@@ -523,8 +519,6 @@ class MainWindow(QMainWindow):
     # ---- 翻译 ------------------------------------------------------------
     def _get_engine(self) -> TranslationEngine:
         if self._engine is None:
-            from mytraxcure.core.translation.engine_factory import create_engine
-
             self._engine = create_engine(self.config.translation)
         return self._engine
 
@@ -538,9 +532,8 @@ class MainWindow(QMainWindow):
         self.overlay.show_translation(region, result, OverlayMode.TRANSLUCENT)
         self.viewer.set_scroll_locked(True)  # 浮层显示期间锁定滚动
         self._trans_label.setText(f"翻译: 完成 {result.elapsed_ms}ms")
-        #缓存开启且非敏感文档 -> 写入缓存
-        if self.config.cache.enabled and not self.config.sensitive_documents:
-            self._cache.put(key, result, file_hash=None)
+        #写入缓存（默认启用缓存）
+        self._cache.put(key, result, file_hash=None)
         self._translation_key = None
         self._translation_region = None
     
@@ -581,19 +574,18 @@ class MainWindow(QMainWindow):
             block_id=blocks[0].block_id
         )
 
-        #检查全局缓存开关是否启用
-        if self.config.cache.enabled:
-            cached = self._cache.get(key)
-            #缓存命中,显示浮层展示翻译结果
-            if cached is not None:
-                self.overlay.show_translation(
-                    region,
-                    cached,
-                    OverlayMode.TRANSLUCENT
-                )
-                self.viewer.set_scroll_locked(True)  # 浮层显示期间锁定滚动
-                self._trans_label.setText(f"翻译: 缓存 {cached.elapsed_ms}ms")
-                return
+        #检查缓存（默认启用）
+        cached = self._cache.get(key)
+        #缓存命中,显示浮层展示翻译结果
+        if cached is not None:
+            self.overlay.show_translation(
+                region,
+                cached,
+                OverlayMode.TRANSLUCENT
+            )
+            self.viewer.set_scroll_locked(True)  # 浮层显示期间锁定滚动
+            self._trans_label.setText(f"翻译: 缓存 {cached.elapsed_ms}ms")
+            return
         #启动工作线程
         if self._worker is None:
             self._worker = TranslationWorker(

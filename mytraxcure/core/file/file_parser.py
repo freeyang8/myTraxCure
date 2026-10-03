@@ -14,7 +14,6 @@ class ParsedDocument: #解析后的文档结构
     kind: str  # pdf / txt / word（不支持 image / 扫描件）
     pages: list[Any] = field(default_factory=list)  # 每页渲染对象/图像
     blocks: list[TextBlock] = field(default_factory=list)#每次创建实例时创建一个空列表，避免多个实例共享同一个列表
-    sensitive: bool = False
     meta: dict[str, Any] = field(default_factory=dict) # 元数据（如 layout_pending：等待渲染期回填 bbox）
 
 class FileParser: #根据文件扩展名调用对应的解析逻辑
@@ -22,7 +21,7 @@ class FileParser: #根据文件扩展名调用对应的解析逻辑
     # v6.2：不做 OCR → 不支持图片/扫描件，仅文本型文档
     SUPPORTED: ClassVar[set[str]] = {".pdf", ".txt", ".doc", ".docx"}
     #表示path的类型可以是str或Path对象
-    def parse(self, path: str | Path, sensitive: bool = False) -> ParsedDocument:
+    def parse(self, path: str | Path) -> ParsedDocument:
         p = Path(path)
         ext = p.suffix.lower()  #suffix->获取扩展名
         #检查后缀是否在允许范围内，并路由到不同解析器
@@ -36,7 +35,6 @@ class FileParser: #根据文件扩展名调用对应的解析逻辑
             doc = self._parse_word(p)
         else:  # 不可达：SUPPORTED 已排除图片等不支持类型
             raise ValueError(f"暂不支持的文件类型：{ext}（仅支持 PDF / Word / TXT）")
-        doc.sensitive = sensitive
         return doc
 
     # ---- 各类型 ----------------------------------------------------------

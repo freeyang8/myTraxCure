@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 
 @dataclass
 class TranslationResult:
     text: str  # 译文
     source: str  # 原文
-    backend: str  # 后端名（ollama/builtin）
+    backend: str  # 后端名（当前仅 ollama）
     model: str  # 模型名
     elapsed_ms: int  # 耗时
     cached: bool  # 是否缓存命中
@@ -24,7 +23,6 @@ class TranslationContext:
     terms: dict[str, str] | None = None  # 术语表：原文→译文
     page: int | None = None
     block_id: str | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
 
 
 class TranslationEngine(ABC): #抽象基类，不需要具体实现，继承它的类才需要

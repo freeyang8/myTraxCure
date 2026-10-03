@@ -26,7 +26,6 @@ dependencies = [
 
 [project.optional-dependencies]
 ocr = ["paddleocr>=2.7", "paddlepaddle>=2.6"]
-builtin = ["transformers>=4.40", "torch>=2.2"]
 
 [project.scripts]
 mytraxcure = "mytraxcure.app:run"

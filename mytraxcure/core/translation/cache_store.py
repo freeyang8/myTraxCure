@@ -143,15 +143,6 @@ class CacheStore:
         conn.commit()
 
     # ---- 清理 ------------------------------------------------------------
-    def delete_for_document(self, file_hash: str) -> None:
-        raise NotImplementedError("TODO: 删除指定文档缓存")
-
-    def cleanup_expired(self, retention_days: int = 30) -> int:
-        raise NotImplementedError("TODO: 清理过期缓存")
-
-    def cleanup_orphans(self) -> int:
-        raise NotImplementedError("TODO: 清理孤儿缓存")
-
     def clear_all(self) -> None:
         conn = self._ensure_conn() #获取数据库连接
         conn.execute("DELETE FROM translation_cache")  #执行 SQL 删除语句

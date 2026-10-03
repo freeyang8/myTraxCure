@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 
@@ -29,8 +29,6 @@ class HeadPose:
     roll: float = 0.0
 
     def max_abs_deg(self) -> float:
-        import math
-
         return max(math.degrees(abs(self.yaw)), math.degrees(abs(self.pitch)), math.degrees(abs(self.roll)))
 
 @dataclass
@@ -57,12 +55,6 @@ class Region:
     def bottom(self) -> int:
         return self.y + self.h
 
-    def contains(self, px: float, py: float) -> bool:
-        return self.x <= px <= self.right and self.y <= py <= self.bottom
-
-    def as_tuple(self) -> tuple[int, int, int, int]:
-        return (self.x, self.y, self.w, self.h)
-
 @dataclass
 class TextBlock:
 
@@ -84,18 +76,15 @@ class TextBlock:
     def bottom(self) -> float:
         return self.y + self.h
 
-    def contains(self, dx: float, dy: float) -> bool:
-        return self.x <= dx <= self.right and self.y <= dy <= self.bottom
+    def contains(self, dx: float, dy: float, tol: float = 0.0) -> bool:
+        # 命中判定的唯一出处；tol 为眼动容差（bbox 外膨胀），由 hit_test 传入
+        return (
+            self.x - tol <= dx <= self.right + tol
+            and self.y - tol <= dy <= self.bottom + tol
+        )
 
     def distance_to(self, dx: float, dy: float) -> float:
         return point_rect_distance(dx, dy, self.x, self.y, self.w, self.h)
-
-    def union(self, other: TextBlock) -> Region:
-        x0 = min(self.x, other.x)
-        y0 = min(self.y, other.y)
-        x1 = max(self.right, other.right)
-        y1 = max(self.bottom, other.bottom)
-        return Region(x=int(x0), y=int(y0), w=int(x1 - x0), h=int(y1 - y0))
 
 @dataclass
 class ParagraphGroup:
@@ -112,12 +101,3 @@ class ParagraphGroup:
     @property
     def height(self) -> int:
         return self.bbox.h
-
-@dataclass
-class DocumentMeta:
-
-    path: str
-    kind: str  # pdf / txt / word（v6.2：不支持 image / 扫描件）
-    file_hash: str = ""
-    sensitive: bool = False
-    extra: dict[str, Any] = field(default_factory=dict)

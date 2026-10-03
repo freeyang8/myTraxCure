@@ -1,37 +1,29 @@
 ﻿# ============================================================================
-# myTraxCure 依赖清单（基于 eyetrax 0.4.0 实测环境）
-# 安装：venv\Scripts\python.exe -m pip install -r requirements.txt
+# myTraxCure 依赖清单（只列项目代码直接需要的包）
+#
+# 不在此列出的传递依赖（pip 装 eyetrax / mediapipe 时会自动带上）：
+#   eyetrax 0.4.0 → numpy<2、opencv-python、scikit-learn、scipy、
+#                   screeninfo、pyvirtualcam、mediapipe>=0.10
+#   mediapipe     → matplotlib、sounddevice
+#
+# 安装（PowerShell，务必用 venv 内的 python，不要直接敲全局 pip）：
+#   E:\software\python\python3.12\python.exe -m venv .venv
+#   .\.venv\Scripts\python.exe -m pip install --upgrade pip
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 # ============================================================================
 
-# ---- 眼动核心（当前 venv 已安装） -----------------------------------------
+# ---- 眼动核心 --------------------------------------------------------------
 eyetrax==0.4.0
-mediapipe==1.0.1
-numpy==1.26.4              # 注意：eyetrax 与 NumPy 2.x 冲突，必须 <2
-opencv-python>=4.10        # eyetrax 内部用 cv2.KalmanFilter
-scikit-learn>=1.4
-scipy>=1.11
-screeninfo>=0.8
-matplotlib>=3.8
-sounddevice>=0.5           # eyetrax app 依赖，可留
-pyvirtualcam>=0.15         # eyetrax virtualcam 用，可选
+mediapipe==1.0.1              # eyetrax 仅要求 >=0.10，此处锁定实测可用版本
+numpy==1.26.4                 # eyetrax 要求 <2；显式锁定，避免被其他包顶到 2.x
+opencv-python>=4.10           # core/gaze/camera.py 直接 import cv2
 
-# ---- GUI -------------------------------------------------------------------
+# ---- GUI ------------------------------------------------------------------
 PyQt6>=6.6
 
-# ---- 文件处理 -------------------------------------------------------------
-PyMuPDF>=1.24              # PDF 文本层 / 渲染
-python-docx>=1.1           # Word 读取（也可转 PDF 再解析）
+# ---- 文件处理（函数内 try/except 导入，缺失只在使用时报友好错误）----------
+PyMuPDF>=1.24                 # import fitz：PDF 文本层解析 / 页面渲染
+python-docx>=1.1              # import docx：Word 读取
 
-# ---- OCR -------------------------------------------------------------------
-# 注意：PaddleOCR / PaddlePaddle 对 Python 3.12 的兼容性需自行确认，
-# 可能需要更低的 Python 版本或特定 paddlepaddle 版本。
-paddleocr>=2.7
-paddlepaddle>=2.6
-
-# ---- 翻译 -------------------------------------------------------------------
-ollama>=0.3                # 官方 Python 客户端（也可直接用 requests 调 HTTP）
-requests>=2.31
-
-# ---- 可选：内置模型后端（后期启用） ---------------------------------------
-# transformers>=4.40
-# torch>=2.2
+# ---- 翻译 -----------------------------------------------------------------
+requests>=2.31                # ollama_engine 直接用 HTTP 调本地 Ollama 服务

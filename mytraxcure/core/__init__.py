@@ -1,6 +1,5 @@
 from mytraxcure.core.config import (
     AppConfig,
-    CacheConfig,
     CalibrationConfig,
     ConfigManager,
     GazeConfig,
@@ -17,7 +16,6 @@ from mytraxcure.core.types import (
 
 __all__ = [
     "AppConfig",
-    "CacheConfig",
     "CalibrationConfig",
     "ConfigManager",
     "GazeConfig",
