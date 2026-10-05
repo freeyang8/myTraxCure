@@ -1,124 +1,18 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+
+# 确保项目根目录在 sys.path 上，使 `mytraxcure` 可导入（无论从哪运行）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mytraxcure.core.file.file_parser import FileParser, ParsedDocument
 
 # ---- 在这里填你本地的 PDF 路径（命令行传参时以传参为准）----
 PDF_PATH = Path(r"E:\Download\IDMDownloads\fiz_test_pdf.pdf")
 
 # 每页最多打印多少个文本块，避免大 PDF 刷屏（0 表示全部打印）
 MAX_BLOCKS_PER_PAGE = 20
-
-# ==================== 以下三块均为项目代码的原样副本 ====================
-
-# ---- 副本 1：来自 mytraxcure/core/types.py 的 TextBlock（纯数据，无逻辑）----
-@dataclass
-class TextBlock:
-
-    text: str
-    page: int
-    x: float
-    y: float
-    w: float
-    h: float
-    block_id: str = ""
-    source: str = ""  # pdf / ocr / txt / word
-
-    def contains(self, dx: float, dy: float) -> bool:
-        return self.x <= dx <= self.x + self.w and self.y <= dy <= self.y + self.h
-
-# ---- 副本 2：来自 file_parser.py 的 ParsedDocument（纯数据，无逻辑）----
-@dataclass
-class ParsedDocument:  # 解析后的文档结构
-
-    path: Path
-    kind: str  # pdf / txt / word / image
-    pages: list[Any] = field(default_factory=list)  # 每页渲染对象/图像
-    blocks: list[TextBlock] = field(default_factory=list)  # 每次创建实例时创建一个空列表，避免多个实例共享同一个列表
-    sensitive: bool = False
-    meta: dict[str, Any] = field(default_factory=dict)
-
-# ---- 副本 3：来自 file_parser.py 55-116 行的 _parse_pdf（原封不动）----
-class FileParser:  # 根据文件扩展名调用对应的解析逻辑
-
-    # ---- 各类型 ----------------------------------------------------------
-    def _parse_pdf(self, path: Path) -> ParsedDocument:
-
-        try:
-            import fitz
-        except ImportError as e:
-            raise ImportError ("需要安装 PyMuPDF：pip install PyMuPDF") from e
-
-        doc = fitz.open(path)
-        print(f"type(doc) = {type(doc)}")
-        print(f"doc = {doc}")
-
-        parsed = ParsedDocument(path = path,kind = "PDF")
-        print(f"type(ParsedDocument) = {type(ParsedDocument)}")
-        print(f"ParsedDocument = {ParsedDocument}")
-
-        needs_ocr_pages:list[int] = [] #页数索引
-
-        #同时返回元素的“索引”和“元素本身”
-        for page_num,page in enumerate(doc):
-            rect = page.rect #获取当前页面的矩形对象,得到页面的宽和高
-            print(f"type(rect) = {type(rect)}")
-            print(f"rect = {rect} ")
-            print(f"rect.width = {rect.width}")
-            print(f"rect.height = {rect.height}")
-            parsed.pages.append( (rect.width,rect.height) )
-
-            text_dict = page.get_text("dict") #"dict" ->以字典格式提取文本
-            #print(f"text_dict = {text_dict}")
-            page_has_text = False
-            block_idx = 0
-            
-            #提取blocks键对应的值，如果没有这个键就返回[]
-            for block in text_dict.get("blocks",[]):
-                if block.get("type") != 0: #0 代表是文本块，1 代表图片块
-                    continue
-                block_idx += 1
-                for line_idx,line in enumerate(block.get("lines",[])):
-                    print(f"line_idx = {line_idx}")
-                    print(f"line = {line}")
-                    for span_idx,span in enumerate(line.get("spans",[])):
-                        print(f"span_idx = {span_idx}")
-                        print(f"span = {span}")
-                        text = span.get("text","").strip()
-                        print(f"text = {text}")
-                        if not text:
-                            continue
-                        x0,y0,x1,y1 = span["bbox"]#取出该文字片段的边界框坐标
-                        parsed.blocks.append(
-                            TextBlock(
-                                text = text,
-                                page = page_num,
-                                x = x0,
-                                y = y0,
-                                w = x1-x0, #高
-                                h = y1-y0, #宽
-                                block_id = f"p{page_num}-b{block_idx}-l{line_idx}-s{span_idx}",
-                                source = "PDF"
-                            )
-                        )
-                        page_has_text = True
-
-            # 无文本层 → 扫描页，交由 OCR 流程处理
-            if not page_has_text:
-                needs_ocr_pages.append(page_num)
-        
-        parsed.meta = {
-            "page_count":doc.page_count,
-            "needs_ocr_pages":needs_ocr_pages
-        }
-        print(f"parsed.meta = {parsed.meta}")
-        
-        doc.close()
-        return parsed
-
-# ==================== 以上为副本，以下为测试驱动 ====================
 
 def parse_pdf_and_report(pdf_path: Path) -> tuple[ParsedDocument, list[str]]:
     problems: list[str] = []
@@ -153,6 +47,8 @@ def parse_pdf_and_report(pdf_path: Path) -> tuple[ParsedDocument, list[str]]:
                 problems.append(f"p{page_num} bbox 超出页面范围: ({b.x:.1f},{b.y:.1f}) {b.w:.1f}x{b.h:.1f}（{b.text!r}）")
             if not b.block_id:
                 problems.append(f"p{page_num} block_id 为空（{b.text!r}）")
+            if not b.para_key:
+                problems.append(f"p{page_num} para_key 为空（{b.text!r}）——段落聚合会退化成单块")
             if b.source != "PDF":
                 problems.append(f"p{page_num} source 应为 PDF，实际 {b.source!r}")
 
