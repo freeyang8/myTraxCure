@@ -19,11 +19,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from mytraxcure.core.config import AppConfig
+from mytraxcure.core.config import AppConfig, ConfigManager
 from mytraxcure.core.fallback import FallbackManager
 from mytraxcure.core.file.file_parser import FileParser, ParsedDocument
 from mytraxcure.core.file.text_mapper import TextMapper
-from mytraxcure.core.gaze import GazeWrapper, SmootherAdapter
+from mytraxcure.core.gaze import NOISE_TUNE_POINTS, GazeWrapper, SmootherAdapter
+from mytraxcure.core.gaze.calibration_runner import describe_mode
 from mytraxcure.core.gaze.calibration_store import (
     CalibrationEnvironment,
     CalibrationStore,
@@ -42,15 +43,19 @@ from mytraxcure.core.translation.translation_worker import TranslationWorker
 from mytraxcure.core.types import GazePoint, Region
 from mytraxcure.ui.feedback_view import FeedbackView
 from mytraxcure.ui.gaze_cursor_view import GazeCursorView
+from mytraxcure.ui.gaze_settings_dialog import GazeSettingsDialog
 from mytraxcure.ui.overlay_view import OverlayMode, OverlayView
 from mytraxcure.ui.viewer_view import ViewerView
 
 
 class MainWindow(QMainWindow):
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self, config: AppConfig, config_manager: ConfigManager | None = None
+    ) -> None:
         super().__init__() #调用父类构造
         self.config = config
+        self.config_manager = config_manager
         self.setWindowTitle("myTraxCure")
         self._last_hover_key:str | None = None
         # 核心对象
@@ -155,22 +160,43 @@ class MainWindow(QMainWindow):
             self._camera.stop()
             self._camera.wait(1500)
             self._camera = None
-        self._status_bar.showMessage("校准中…跟随屏幕上 9 个点（ESC 取消），界面暂时无响应属正常")
-        ok = run_and_save(store, env, self.config.gaze.camera_index)
-        self._status_bar.showMessage("校准完成" if ok else "校准已取消/失败，继续未校准运行")
-        if ok and self._gaze_wrapper is not None:
+        mode = self.config.calibration.mode
+        self._status_bar.showMessage(
+            f"校准中…跟随屏幕上的{describe_mode(mode)}校准点（ESC 取消），界面暂时无响应属正常"
+        )
+        try:
+            report = run_and_save(
+                store,
+                env,
+                self.config.gaze.camera_index,
+                self.config.calibration,
+                self.config.gaze,
+            )
+        except Exception as exc:
+            # 摄像头/建窗/模型训练都可能抛；Qt 槽里未捕获异常会直接结束进程
+            report = None
+            self._status_bar.showMessage(f"校准失败：{exc}")
+            return
+        self._status_bar.showMessage(
+            f"校准完成：{report.summary()}"
+            if report is not None
+            else "校准已取消/失败，继续未校准运行"
+        )
+        if report is not None and self._gaze_wrapper is not None:
             # run_and_save 训练的是它内部的临时 estimator；必须把新 pkl 立即
             # 加载回主线程的 wrapper，否则 wrapper 仍是未 fit 状态（predict 会炸）
             store.load(self._gaze_wrapper, env)
-        if ok:
+        if report is not None:
             self._run_noise_tuning()
 
-    #滤波微调：3 个点各盯 0.5s 收集 predict 抖动 → 方差写入 measurementNoiseCov。
+    #滤波微调：9 个点各盯约 1s，收集 predict 抖动 → 方差写入 measurementNoiseCov。
     #前提：摄像头空闲（CameraThread 未启动）、wrapper 已加载校准模型。
     def _run_noise_tuning(self) -> None:
         if self._gaze_wrapper is None or self._smoother is None:
             return
-        self._status_bar.showMessage("滤波微调中…盯着 3 个点直到消失（ESC 跳过）")
+        self._status_bar.showMessage(
+            f"滤波微调中…依次盯着 {NOISE_TUNE_POINTS} 个点直到它们消失（ESC 跳过）"
+        )
         try:
             tuned = self._smoother.tune(
                 self._gaze_wrapper.estimator,
@@ -192,6 +218,15 @@ class MainWindow(QMainWindow):
         if sample is None or sample.blink:
             if self._gaze_cursor is not None:
                 self._gaze_cursor.clear()
+            return
+        #头部姿态门控：yaw/pitch 超阈值（转头看别处）时本帧丢弃，与眨眼同处理。
+        #不判 roll：eyetrax 正脸 roll≈±π 且环绕跳变，绝对阈值会永久拒帧
+        if not self.detector.head_angle_allowed(
+            self.config.gaze.max_head_angle_deg, sample.head_pose
+        ):
+            if self._gaze_cursor is not None:
+                self._gaze_cursor.clear()
+            self.detector.reset()  # 清窗：不许转头前后的点跨间隙凑成一次驻留
             return
         #坐标预测
         try:
@@ -275,10 +310,11 @@ class MainWindow(QMainWindow):
         #询问用户是否启动眼动校准
         if ask_calibration:
             has_pkl = store.exists(env) #检查是否存在当前用户/摄像头组合的校准文件
+            mode_label = describe_mode(self.config.calibration.mode)
             ans = QMessageBox.question(
                 self, "眼动校准",
-                "是否先进行 9 点眼动校准？\n\n"
-                "[是] 运行校准后启用（全屏窗口跟随 9 个点，ESC 取消）\n"
+                f"是否先进行{mode_label}眼动校准？\n\n"
+                f"[是] 运行校准后启用（全屏窗口跟随{mode_label}校准点，ESC 取消）\n"
                 "[否] " + ("使用已有校准直接启用" if has_pkl else "跳过校准启用（视线预测不准）"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes
@@ -362,9 +398,30 @@ class MainWindow(QMainWindow):
 
         mouse_action = QAction("鼠标模式", self)
         mouse_action.triggered.connect(self._enable_mouse_mode)
-        mode_menu.addAction(mouse_action) 
+        mode_menu.addAction(mouse_action)
+
+        #添加“设置”菜单
+        settings_menu = menu_bar.addMenu("设置(&S)")
+        assert settings_menu is not None
+        gaze_settings_action = QAction("眼动滤波…", self)
+        gaze_settings_action.triggered.connect(self._open_gaze_settings)
+        settings_menu.addAction(gaze_settings_action)
 
         #recal_action = QAction("重新校准…", self)
+
+    #眼动滤波设置：滑条拖动即生效（红点可见），确定才写入 config.local.json
+    def _open_gaze_settings(self) -> None:
+        dialog = GazeSettingsDialog(
+            self.config,
+            config_manager=self.config_manager,
+            on_ema_changed=self._apply_ema_alpha,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _apply_ema_alpha(self, alpha: float) -> None:
+        if self._smoother is not None:
+            self._smoother.set_ema_alpha(alpha)
 
     def _build_status_bar(self) -> None:
         bar = self.statusBar()

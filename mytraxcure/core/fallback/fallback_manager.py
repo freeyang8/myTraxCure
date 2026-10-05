@@ -47,7 +47,8 @@ class FallbackManager:
             cap = open_camera(cfg.camera_index) # 打开摄像头
             cap.release()  #立即释放摄像头资源,只尝试不占用
             self.gaze_wrapper = GazeWrapper(
-                model_name = cfg.model_name,
+                # 这里只是构造占位；实际预测模型来自 load_model 载入的校准 pkl
+                model_name = cfg.runtime_model_name(),
                 face_landmarker_model = cfg.face_landmarker_model
             )
         except Exception as exc:

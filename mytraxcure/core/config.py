@@ -14,12 +14,19 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 CACHE_DB_PATH = DATA_DIR / "cache.db"
 CONFIG_PATH = PROJECT_ROOT / "config.local.json"
 
+# model_name="auto" 时运行时构造估算器用的占位模型名：实际模型由校准 pkl 决定
+_RUNTIME_PLACEHOLDER_MODEL = "ridge"
+
 @dataclass
 class GazeConfig:
 
-    model_name: str = "ridge"  # ridge/elastic_net/linear_svr/svr/tiny_mlp
+    # auto：校准后按交叉验证误差自动选（ridge/elastic_net/tiny_mlp）
+    # 也可指定具体模型：ridge/elastic_net/linear_svr/svr/tiny_mlp
+    # 注意 eyetrax 0.4.0 里 svr 是 linear_svr 的别名（都是 LinearSVR，线性模型）
+    model_name: str = "auto"
     camera_index: int = 0
-    ema_alpha: float = 0.25        # EMA 强度（平滑算法固定 kalman_ema，此值待实测调优）
+    # EMA 强度：eyetrax 公式 out = a*prev + (1-a)*new → a 越大越平滑但越滞后
+    ema_alpha: float = 0.25
     face_landmarker_model: str | None = None  # None → eyetrax 自动下载/环境变量
 
     # ---- 凝视稳定判定 --------------------------
@@ -41,6 +48,28 @@ class GazeConfig:
 
     # 头部姿态阈值：yaw/pitch/roll 任一角超过则暂停选区
     max_head_angle_deg: float = 15.0
+
+    def runtime_model_name(self) -> str:
+        """构造 GazeEstimator 时要的具体模型名（必须是 eyetrax 认识的合法名字）。
+
+        "auto" 只是校准期的选择策略，create_model 不认；眼动模式创建 wrapper 时
+        先用占位模型（ridge），随后 load_model 会用 pkl 里校准好的模型整体替换。
+        配置文件可手改，写错的模型名在这里统一兜住，避免构造阶段就抛异常。
+        """
+        if self.model_name == "auto":
+            return _RUNTIME_PLACEHOLDER_MODEL
+        try:
+            from eyetrax.models import create_model  # 延迟导入：config 保持无重依赖
+
+            create_model(self.model_name)
+            return self.model_name
+        except Exception as exc:
+            print(
+                f"[config] 回归模型 {self.model_name!r} 不可用（{exc}），"
+                f"已改用 {_RUNTIME_PLACEHOLDER_MODEL}",
+                file=sys.stderr,
+            )
+            return _RUNTIME_PLACEHOLDER_MODEL
 
 @dataclass
 class RegionConfig:
@@ -71,8 +100,11 @@ class TranslationConfig:
 @dataclass
 class CalibrationConfig:
 
-    mode: str = "9_point"  # 5_point / 9_point / dense / lissajous / adaptive
-    sample_seconds_per_point: float = 1.5  # eyetrax 默认 1.0，需调长
+    # 5_point / 9_point / dense（5x5=25 点）/ lissajous / adaptive
+    mode: str = "dense"
+    # 每个点的采集时长（秒），网格模式生效；脉冲提示固定 0.8s 不计入
+    sample_seconds_per_point: float = 1.5
+    # 每点样本数下限，低于只告警不失败（眨眼/丢脸会导致帧数偏少）
     min_frames_per_point: int = 30
 
 @dataclass

@@ -17,6 +17,7 @@ CORE_MODULES = [
     "mytraxcure.core.gaze.gaze_wrapper",
     "mytraxcure.core.gaze.smoother_adapter",
     "mytraxcure.core.gaze.startup_calibration",
+    "mytraxcure.core.gaze.calibration_runner",
     "mytraxcure.core.gaze.calibration_store",
     "mytraxcure.core.gaze_logic",
     "mytraxcure.core.gaze_logic.gaze_detector",
@@ -44,6 +45,7 @@ QT_MODULES = [
     "mytraxcure.ui.overlay_view",
     "mytraxcure.ui.feedback_view",
     "mytraxcure.ui.settings_view",
+    "mytraxcure.ui.gaze_settings_dialog",
     "mytraxcure.app",
 ]
 

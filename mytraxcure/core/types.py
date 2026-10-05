@@ -29,7 +29,10 @@ class HeadPose:
     roll: float = 0.0
 
     def max_abs_deg(self) -> float:
-        return max(math.degrees(abs(self.yaw)), math.degrees(abs(self.pitch)), math.degrees(abs(self.roll)))
+        # 只判 yaw/pitch：eyetrax 的 roll 正脸≈±π 且在 ±π 间环绕跳变，
+        # 拿绝对值做阈值会把所有帧（含正脸）判成超限。
+        # 单纯歪头本身被 eyetrax 的人脸坐标系归一化抵消掉大部分，故不参与门控。
+        return max(math.degrees(abs(self.yaw)), math.degrees(abs(self.pitch)))
 
 @dataclass
 class GazeSample:
