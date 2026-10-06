@@ -44,6 +44,26 @@ class CacheKey:
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+def make_segment_key(
+    segment: tuple[str, str, int, str], cfg, backend: str
+) -> CacheKey:
+    """段落 (para_key, 文本, page, 首块 block_id) → 缓存键。
+
+    预翻译与即时翻译必须共用这一个构造函数：任何一处字段不一致，
+    预翻译写进去的结果就永远命不中，整个预翻译等于白做。
+    """
+    _para_key, text, page, block_id = segment
+    return CacheKey(
+        source_text=text,
+        source_lang=cfg.source_lang,
+        target_lang=cfg.target_lang,
+        backend=backend,
+        model=cfg.model,
+        page=page,
+        block_id=block_id,
+    )
+
+
 class CacheStore:
 
     def __init__(self, db_path=None) -> None:

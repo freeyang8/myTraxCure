@@ -1,172 +1,229 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from mytraxcure.core.file.file_parser import ParsedDocument
+from mytraxcure.core.file.segmenter import (
+    NOTICE_SOURCE,
+    group_paragraphs,
+    paragraph_text,
+    paragraph_text_with_spans,
+)
+from mytraxcure.core.types import TextBlock
 
 if TYPE_CHECKING:
     from mytraxcure.core.file.text_mapper import TextMapper
 
-# TXT 排版基准参数（文档坐标）
+# 重排版面参数（文档坐标，所有文档类型统一）
 # 大字号 + 大行高：文本块 bbox 更大，凝视命中/段落选中概率显著提高（眼动输入精度有限）
-_TXT_LINE_HEIGHT = 34      # 行高（像素，需 ≥ 字号 × 1.5，否则行重叠）
-_TXT_MARGIN = 40           # 左右边距（像素）
-_TXT_FONT_SIZE = 20        # 字号（磅）
-_TXT_MIN_PAGE_W = 640      # 最小页面宽度（像素）
-_TXT_MIN_PAGE_H = 400      # 最小页面高度（像素）
-_TXT_WRAP_WIDTH = 960      # 内容最大宽度（像素；超长行折行）
+_LINE_HEIGHT = 34      # 行高（像素，需 ≥ 字号 × 1.5，否则行重叠）
+_MARGIN = 40           # 左右边距（像素）
+_FONT_SIZE = 20        # 字号（磅）
+_WRAP_WIDTH = 960      # 内容最大宽度（像素；超长行折行）
+_PARA_GAP = _LINE_HEIGHT // 2   # 段落间距 = 0.5 行高（需求指定）
+_MIN_HEIGHT = 400      # 版面最小高度，避免短文档贴顶
+
+def _make_font():
+    from PyQt6.QtGui import QFont
+
+    font = QFont()
+    font.setFamilies(["Microsoft YaHei", "SimSun", "Arial"])
+    font.setPointSize(_FONT_SIZE)
+    return font
+
+@dataclass
+class ParagraphLayout:
+
+    para_key: str
+    y0: int
+    y1: int
+    lines: list[str]
+    blocks: list[TextBlock]
+    is_notice: bool = False
+
+@dataclass
+class ReflowLayout:
+
+    paragraphs: list[ParagraphLayout] = field(default_factory=list)
+    width: int = 0
+    height: int = 0
 
 class DocumentRenderer:
+    """全类型统一重排渲染：按段落顺序纵向排布，只渲染可视区域。
+
+    v1 不分页——整篇文档就是一条连续的纵向版面（逻辑页恒为 0）。
+    不预先拼整页大图：超长文档（几千段）会撞上 Qt 位图的 32767px 上限，
+    改为按视口渲染后，每帧只分配"窗口大小"的图，滚动深度不受限。
+    """
 
     def __init__(self, document: ParsedDocument) -> None:
         self.document = document
-        self._page_cache: dict[int, Any] = {}
-        self._fitz_doc: Any = None
-        # TXT/Word 回填 bbox 后用于重新注册文本块（需求 6.8.8 前置）
+        self._layout: ReflowLayout | None = None
+        self._font: Any = None
+        # 回填 bbox 后重新注册文本块（命中/段落聚合依赖新 bbox）
         self._mapper: TextMapper | None = None
 
     def set_mapper(self, mapper: TextMapper | None) -> None:
         self._mapper = mapper
 
-    # 获取当前文档的总页数
-    def page_count(self) -> int:
-        return len(self.document.pages)
+    # ---- 版面 ------------------------------------------------------------
+    def _ensure_layout(self) -> ReflowLayout:
+        if self._layout is not None:
+            return self._layout
 
-    # ---- PDF ------------------------------------------------------------
-    def _render_pdf(self, page_index: int) -> np.ndarray:
-        if self._fitz_doc is None:
-            import fitz
-            self._fitz_doc = fitz.open(self.document.path)
+        from PyQt6.QtGui import QFontMetrics
 
-        page = self._fitz_doc[page_index]  # 根据页码取出页面对象
-
-        pix = page.get_pixmap(  # 获取图像的截图
-            alpha=False,  # 是否生成透明通道 A
-        )
-
-        img = np.frombuffer(  # 把“字节流”变成“数组”
-            pix.samples,
-            dtype=np.uint8,
-        ).reshape(
-            pix.height,
-            pix.width,
-            pix.n,
-        )
-        return img.copy()
-
-    # ---- TXT ------------------------------------------------------------
-    def _render_text_page(self, page_index: int) -> np.ndarray:
-        from PyQt6.QtCore import QRect, Qt
-        from PyQt6.QtGui import QFont, QFontMetrics, QImage, QPainter
-
-        blocks = [b for b in self.document.blocks if b.page == page_index]
-        need_backfill = bool(self.document.meta.get("layout_pending", False))
-
-        # 基准字体 + metrics
-        font = QFont()
-        font.setFamilies(["Microsoft YaHei", "SimSun", "Arial"])
-        font.setPointSize(_TXT_FONT_SIZE)
+        font = _make_font()
         fm = QFontMetrics(font)
+        self._font = font
 
-        # 布局：把每个 block 按 _TXT_WRAP_WIDTH 折成视觉行，连续推进行游标；
-        # 相邻 block 行号差 > 1 时补空行位（原文空行无 block 但要留间距）
-        line_of_block = [self._extract_line_idx(b.block_id) for b in blocks]
-        layout: list[tuple] = []  # (block, start_row, wrapped_lines)
-        row = 0
-        prev_li = -1
-        for b, li in zip(blocks, line_of_block):
-            if layout and li > prev_li + 1:
-                row += li - prev_li - 1  # 空行占位
-            wrapped = self._wrap_text(fm, b.text, _TXT_WRAP_WIDTH)
-            layout.append((b, row, wrapped))
-            row += len(wrapped)
-            prev_li = li
+        paragraphs: list[ParagraphLayout] = []
+        y = 0
+        for para_key, blocks in group_paragraphs(self.document.blocks):
+            is_notice = blocks[0].source == NOTICE_SOURCE
+            text = blocks[0].text if is_notice else paragraph_text(blocks)
+            if not text.strip():
+                continue
 
-        # 页面尺寸：宽度固定（超长行已折行），高度按折行后总行数
-        page_w = max(_TXT_WRAP_WIDTH + _TXT_MARGIN * 2, _TXT_MIN_PAGE_W)
-        page_h = max(row * _TXT_LINE_HEIGHT, _TXT_MIN_PAGE_H)
+            ranges = self._wrap_ranges(fm, text, _WRAP_WIDTH)
+            lines = [text[a:b] for a, b in ranges]
+            y0 = y
+            y1 = y + len(lines) * _LINE_HEIGHT
 
-        # 绘制到白底 QImage
-        qimg = QImage(page_w, page_h, QImage.Format.Format_RGB888)
+            if is_notice:
+                self._fill_blocks(blocks, lines=lines, y0=y0, fm=fm)
+            else:
+                self._backfill_blocks(blocks, text, ranges, y0, fm)
+            paragraphs.append(
+                ParagraphLayout(para_key, y0, y1, lines, blocks, is_notice)
+            )
+            y = y1 + _PARA_GAP
+
+        self._layout = ReflowLayout(
+            paragraphs=paragraphs,
+            width=_WRAP_WIDTH + _MARGIN * 2,
+            height=max(y - _PARA_GAP, _MIN_HEIGHT),
+        )
+        self.document.meta["layout_pending"] = False
+        if self._mapper is not None:
+            self._mapper.register_blocks(self.document.blocks)
+        return self._layout
+
+    def content_size(self) -> tuple[int, int]:
+        layout = self._ensure_layout()
+        return layout.width, layout.height
+
+    def _backfill_blocks(
+        self, blocks: list[TextBlock], text: str, ranges: list[tuple[int, int]], y0: int, fm: Any
+    ) -> None:
+        """把重排后的 bbox 写回 block：命中和段落并集都读这份坐标。
+
+        每个 block 分到它在段落文本里占的字符区间所覆盖的那几行——
+        段内 block 于是天然沿 y 连续，段落并集 bbox 就等于整段的排版范围。
+        """
+        _, spans = paragraph_text_with_spans(blocks)
+        covered: set[int] = set()
+        starts = [a for a, _ in ranges]
+        for b, start, end in spans:
+            i0 = max(bisect_right(starts, start) - 1, 0)
+            i1 = max(bisect_right(starts, end - 1) - 1, i0)
+            b.x = float(_MARGIN)
+            b.y = float(y0 + i0 * _LINE_HEIGHT)
+            b.h = float((i1 - i0 + 1) * _LINE_HEIGHT)
+            b.w = float(max(fm.horizontalAdvance(text[a:c]) for a, c in ranges[i0 : i1 + 1]))
+            covered.add(id(b))
+        for b in blocks:
+            if id(b) not in covered:  # 空白块：零尺寸框，标在段首（不会抢命中）
+                b.x, b.y, b.w, b.h = float(_MARGIN), float(y0), 0.0, 0.0
+
+    def _fill_blocks(
+        self, blocks: list[TextBlock], lines: list[str], y0: int, fm: Any
+    ) -> None:
+        """提示块（扫描页占位）整段一个框。"""
+        width = float(max(fm.horizontalAdvance(line) for line in lines))
+        for b in blocks:
+            b.x = float(_MARGIN)
+            b.y = float(y0)
+            b.w = width
+            b.h = float(len(lines) * _LINE_HEIGHT)
+
+    # ---- 渲染 ------------------------------------------------------------
+    def render_viewport(
+        self, x_offset: float, y_offset: float, width: int, height: int
+    ) -> np.ndarray:
+        """渲染文档坐标 (x_offset, y_offset) 起、width×height 大的可视区域。"""
+        from PyQt6.QtCore import QRect, Qt
+        from PyQt6.QtGui import QImage, QPainter
+
+        layout = self._ensure_layout()
+        w, h = max(int(width), 1), max(int(height), 1)
+        qimg = QImage(w, h, QImage.Format.Format_RGB888)
         qimg.fill(Qt.GlobalColor.white)
 
         painter = QPainter(qimg)
-        painter.setFont(font)
+        painter.setFont(self._font)
         painter.setPen(Qt.GlobalColor.black)
-
-        for b, start_row, wrapped in layout:
-            # 画图坐标：行位 × 行高，逐视觉行绘制
-            for k, line in enumerate(wrapped):
-                px = _TXT_MARGIN
-                py = (start_row + k) * _TXT_LINE_HEIGHT
+        painter.translate(-x_offset, -y_offset)  # 之后一律按文档坐标绘制
+        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        for para in layout.paragraphs:
+            if para.y1 < y_offset or para.y0 > y_offset + h:
+                continue  # 视口外的段落直接跳过
+            for k, line in enumerate(para.lines):
                 painter.drawText(
-                    QRect(
-                        int(px),
-                        int(py),
-                        _TXT_WRAP_WIDTH,
-                        _TXT_LINE_HEIGHT,
-                    ),
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    QRect(_MARGIN, para.y0 + k * _LINE_HEIGHT, _WRAP_WIDTH, _LINE_HEIGHT),
+                    flags,
                     line,
                 )
-            # 回填文档坐标：bbox 覆盖整个折行段
-            if need_backfill:
-                b.x = float(_TXT_MARGIN)
-                b.y = float(start_row * _TXT_LINE_HEIGHT)
-                b.w = float(max(fm.horizontalAdvance(l) for l in wrapped))
-                b.h = float(len(wrapped) * _TXT_LINE_HEIGHT)
-
         painter.end()
+        return self._qimage_to_rgb_array(qimg, w, h)
 
-        # 回填完成 → 清标志 + 重新注册（段落模式对 TXT 生效的唯一前置）
-        if need_backfill:
-            self.document.meta["layout_pending"] = False
-            if self._mapper is not None:
-                self._mapper.register_blocks(self.document.blocks)
-
-        return self._qimage_to_rgb_array(qimg, page_w, page_h)
-
-    # ---- 工具 -----------------------------------------------------------
-    @staticmethod
-    def _extract_line_idx(block_id: str) -> int:
-        if not block_id or not block_id.startswith("l"):
-            return 0
-        try:
-            return int(block_id[1:].split("-", 1)[0])
-        except (ValueError, IndexError):
-            return 0
-
+    # ---- 折行 ------------------------------------------------------------
     @staticmethod
     def _wrap_text(fm: Any, text: str, max_w: int) -> list[str]:
+        return [text[a:b] for a, b in DocumentRenderer._wrap_ranges(fm, text, max_w)]
+
+    @staticmethod
+    def _wrap_ranges(fm: Any, text: str, max_w: int) -> list[tuple[int, int]]:
+        """按宽度折行，返回每行的字符区间 [start, end)。
+
+        返回区间而不是字符串：渲染要用行文本，回填 bbox 还要知道"每个 block 占了哪几行"。
+        """
         if not text:
-            return [""]
-        lines: list[str] = []
-        cur = ""
+            return [(0, 0)]
+        ranges: list[tuple[int, int]] = []
+        cur: tuple[int, int] | None = None
         cur_w = 0
-        for token in re.findall(r"\S+\s*", text):
-            tw = fm.horizontalAdvance(token)
+        for m in re.finditer(r"\S+\s*", text):
+            s, e = m.start(), m.end()
             # token 自身超宽（长英文串 / 无空格 CJK 整段）→ 按字符切
-            while tw > max_w and len(token) > 1:
-                k = len(token) - 1
-                while k > 1 and fm.horizontalAdvance(token[:k]) > max_w:
+            while s < e and fm.horizontalAdvance(text[s:e]) > max_w:
+                k = e - s - 1
+                while k > 1 and fm.horizontalAdvance(text[s : s + k]) > max_w:
                     k -= 1
-                head, token = token[:k], token[k:]
-                if cur:
-                    lines.append(cur)
-                    cur, cur_w = "", 0
-                lines.append(head)
-                tw = fm.horizontalAdvance(token)
-            if cur and cur_w + tw > max_w:
-                lines.append(cur)
-                cur, cur_w = token, tw
+                k = max(k, 1)
+                if cur is not None:
+                    ranges.append(cur)
+                    cur, cur_w = None, 0
+                ranges.append((s, s + k))
+                s += k
+            if s >= e:
+                continue
+            seg_w = fm.horizontalAdvance(text[s:e])
+            if cur is None:
+                cur, cur_w = (s, e), seg_w
+            elif cur_w + seg_w > max_w:
+                ranges.append(cur)
+                cur, cur_w = (s, e), seg_w
             else:
-                cur += token
-                cur_w += tw
-        lines.append(cur)
-        return lines
+                cur, cur_w = (cur[0], e), cur_w + seg_w
+        if cur is not None:
+            ranges.append(cur)
+        return ranges or [(0, 0)]
 
     @staticmethod
     def _qimage_to_rgb_array(qimg: Any, w: int, h: int) -> np.ndarray:
@@ -178,21 +235,6 @@ class DocumentRenderer:
         arr = arr[:, : w * 3].reshape(h, w, 3)
         return arr.copy()
 
-    # ---- 对外 -----------------------------------------------------------
-    def render_page(self, page_index: int) -> np.ndarray:
-        key = page_index
-        if key in self._page_cache:
-            return self._page_cache[key]
-
-        kind = self.document.kind.upper()
-        if kind == "PDF":
-            img = self._render_pdf(page_index)
-        elif kind == "TXT":
-            img = self._render_text_page(page_index)
-        else:
-            raise ValueError(f"暂不支持渲染 {kind} 类型（本项目仅支持 PDF / Word / TXT）")
-        self._page_cache[key] = img
-        return img
-
+    # ---- 缓存 ------------------------------------------------------------
     def invalidate_cache(self) -> None:
-        self._page_cache.clear()
+        self._layout = None

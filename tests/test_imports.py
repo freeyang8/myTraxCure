@@ -24,6 +24,7 @@ CORE_MODULES = [
     "mytraxcure.core.gaze_logic.region_locker",
     "mytraxcure.core.file",
     "mytraxcure.core.file.file_parser",
+    "mytraxcure.core.file.segmenter",
     "mytraxcure.core.file.text_mapper",
     "mytraxcure.core.file.file_viewer",
     "mytraxcure.core.translation",
@@ -31,6 +32,7 @@ CORE_MODULES = [
     "mytraxcure.core.translation.ollama_engine",
     "mytraxcure.core.translation.engine_factory",
     "mytraxcure.core.translation.cache_store",
+    "mytraxcure.core.translation.translation_worker",
     "mytraxcure.core.fallback",
     "mytraxcure.core.fallback.fallback_manager",
 ]
@@ -38,6 +40,7 @@ CORE_MODULES = [
 # 依赖 PyQt6 的模块（未安装时跳过）
 QT_MODULES = [
     "mytraxcure.core.gaze.camera",
+    "mytraxcure.core.translation.pre_translator",
     "mytraxcure.core.gaze_logic.keyboard_handler",
     "mytraxcure.ui",
     "mytraxcure.ui.main_window",

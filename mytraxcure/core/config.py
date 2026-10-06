@@ -97,6 +97,10 @@ class TranslationConfig:
 
     term_table_path: str | None = None  # CSV 术语表：原文,译文
 
+    # 加载文档后按阅读顺序在后台预翻译（只写缓存；用户按空格时命中缓存即时出译文）
+    pre_translate: bool = True
+    pre_translate_max_segments: int = 30  # 单次最多预翻译多少段，避免整本书跑满本地模型
+
 @dataclass
 class CalibrationConfig:
 

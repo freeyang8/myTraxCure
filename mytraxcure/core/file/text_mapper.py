@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from mytraxcure.core.file.segmenter import group_paragraphs, paragraph_text
 from mytraxcure.core.types import ParagraphGroup, Region, TextBlock
 
 
@@ -84,10 +85,13 @@ class TextMapper:
         dx, dy = self.screen_to_document(screen_point)
         tol = max(tolerance_px, 0.0)
 
-        # 1. 精确命中（含眼动容差的外膨胀，判定逻辑集中在 TextBlock.contains）
-        for block in reversed(self._blocks):
-            if block.contains(dx, dy, tol):
-                return block
+        # 1. 命中候选（含眼动容差的外膨胀，判定逻辑集中在 TextBlock.contains）
+        #    多候选时取"离凝视点最近"的块，而不是列表里最后一个：重排版面的段间距
+        #    只有 0.5 行高，容差 100px 会让上下相邻几段的命中域全部重叠，
+        #    按逆序取第一个会稳定选中下方 1~3 段。并列时取靠上的段。
+        candidates = [b for b in self._blocks if b.contains(dx, dy, tol)]
+        if candidates:
+            return min(candidates, key=lambda b: (b.distance_to(dx, dy), b.y, b.x))
 
         # 2. 回退"最近块"：距离最小且 ≤ tolerance 才承认命中
         if tol > 0 and self._blocks:
@@ -95,6 +99,47 @@ class TextMapper:
             if nearest.distance_to(dx, dy) <= tol:
                 return nearest
         return None
+
+    # ---- 段落（重排后凝视选中的唯一单位）--------------------------------
+    def paragraph_blocks(self, para_key: str) -> list[TextBlock]:
+        return [b for b in self._blocks if b.para_key == para_key]
+
+    def segment_text(self, para_key: str) -> str:
+        """段落文本的唯一出处：预翻译与即时翻译都从这里取，缓存键才会一致。"""
+        return paragraph_text(self.paragraph_blocks(para_key))
+
+    def segment_key_parts(self, para_key: str) -> tuple[str, str, int, str] | None:
+        """段落的 (para_key, 文本, page, 首块 block_id)；无文本段返回 None。
+
+        与 segments() 的元素同形状，可直接交给 make_segment_key 建缓存键。
+        """
+        blocks = self.paragraph_blocks(para_key)
+        text = paragraph_text(blocks)
+        if not blocks or not text.strip():
+            return None
+        return para_key, text, blocks[0].page, blocks[0].block_id
+
+    def region_key_parts(self, region: Region) -> tuple[str, str, int, str] | None:
+        """点模式回退：区域内 blocks 按阅读顺序拼成文本。"""
+        blocks = self.blocks_in_region(region)
+        if not blocks:
+            return None
+        text = paragraph_text(blocks)
+        if not text.strip():
+            return None
+        return blocks[0].para_key, text, blocks[0].page, blocks[0].block_id
+
+    def segments(self) -> list[tuple[str, str, int, str]]:
+        """按阅读顺序返回各段的 (para_key, 文本, page, 首块 block_id)。
+
+        顺序即重排版面的从上到下，也正是用户的阅读顺序——预翻译照此排队。
+        """
+        out: list[tuple[str, str, int, str]] = []
+        for para_key, blocks in group_paragraphs(self._blocks):
+            text = paragraph_text(blocks)
+            if text.strip():
+                out.append((para_key, text, blocks[0].page, blocks[0].block_id))
+        return out
 
     # ---- 段落聚合（需求 6.8.7） ---------------------------------------
     @staticmethod

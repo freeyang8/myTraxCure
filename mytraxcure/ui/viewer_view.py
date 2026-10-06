@@ -71,7 +71,13 @@ class ViewerView(QWidget):
     def scroll_contents(self, dx: int, dy: int) -> None:
         if self._scroll_locked:  # 浮层显示期间冻结页面（滚轮/拖动均被拦截）
             return
-        self._scroll += QPoint(dx, dy)
+        max_x = max_y = 0
+        if self._renderer is not None:
+            cw, ch = self._renderer.content_size()
+            max_x, max_y = max(cw - self.width(), 0), max(ch - self.height(), 0)
+        # 夹在版面范围内：别滚进空白，也别滚出文档尾部
+        self._scroll.setX(min(max(self._scroll.x() + dx, 0), max_x))
+        self._scroll.setY(min(max(self._scroll.y() + dy, 0), max_y))
         self._sync_viewport()
         self.update()
 
@@ -90,9 +96,12 @@ class ViewerView(QWidget):
         if self._renderer is None:
             # 无文档时不获取画笔，避免空绘制破坏 Qt 原生态
             return
-        self._sync_viewport() 
+        self._sync_viewport()
 
-        img = self._renderer.render_page(0) #取当前页的 RGB 图像，通常是NumPy的数组
+        # 只渲染可视区：返回的图像就是控件大小，滚多深都不会分配超大位图
+        img = self._renderer.render_viewport(
+            self._scroll.x(), self._scroll.y(), self.width(), self.height()
+        )
 
         h,w = img.shape[:2] #读取图像的宽高 (h, w)
         qimg = QImage(
@@ -102,12 +111,6 @@ class ViewerView(QWidget):
             w*3, #每行字节数
             QImage.Format.Format_RGB888 #像素格式，每像素24bit,且按RGB顺序排列
         )
-        pixmap = QPixmap.fromImage(qimg) #转换为QPixmap
         painter = QPainter(self) #创建画笔并绑定到指定绘图设备
-        
-        painter.drawPixmap( #绘制 Pixmap
-            -self._scroll.x(),
-            -self._scroll.y(),
-            pixmap #要绘制的图像
-        )
+        painter.drawPixmap(0, 0, QPixmap.fromImage(qimg))  # 已是视口切片，不再需要负偏移
         painter.end()

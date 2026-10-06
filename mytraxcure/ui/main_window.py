@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 from mytraxcure.core.config import AppConfig, ConfigManager
 from mytraxcure.core.fallback import FallbackManager
 from mytraxcure.core.file.file_parser import FileParser, ParsedDocument
+from mytraxcure.core.file.segmenter import make_ocr_notices, segment_blocks
 from mytraxcure.core.file.text_mapper import TextMapper
 from mytraxcure.core.gaze import NOISE_TUNE_POINTS, GazeWrapper, SmootherAdapter
 from mytraxcure.core.gaze.calibration_runner import describe_mode
@@ -33,8 +34,13 @@ from mytraxcure.core.gaze.camera import CameraThread
 from mytraxcure.core.gaze.startup_calibration import run_and_save
 from mytraxcure.core.gaze_logic.gaze_detector import GazeDetector
 from mytraxcure.core.gaze_logic.region_locker import RegionLocker
-from mytraxcure.core.translation.cache_store import CacheKey, CacheStore
+from mytraxcure.core.translation.cache_store import (
+    CacheKey,
+    CacheStore,
+    make_segment_key,
+)
 from mytraxcure.core.translation.engine_factory import create_engine
+from mytraxcure.core.translation.pre_translator import PreTranslator
 from mytraxcure.core.translation.translation_engine import (
     TranslationEngine,
     TranslationResult,
@@ -91,6 +97,8 @@ class MainWindow(QMainWindow):
         self._gaze_wrapper: GazeWrapper | None = None
         self._smoother: SmootherAdapter | None = None
         self._gaze_cursor: GazeCursorView | None = None #眼动->屏幕映射
+        self._locked_para_key: str | None = None #当前锁定段落（段落模式下翻译取文本用）
+        self._pre_translator: PreTranslator | None = None #后台预翻译线程
 
     #抓取鼠标位置作为凝视点数据
     def _poll_cursor(self)->None:
@@ -102,6 +110,7 @@ class MainWindow(QMainWindow):
         self.on_gaze_point(gazepoint)
     #窗口关闭
     def closeEvent(self,event)->None:
+        self._stop_pre_translation()
         if self._camera is not None:
             self._camera.stop()
             self._camera.wait(1500)
@@ -443,12 +452,61 @@ class MainWindow(QMainWindow):
 
     #加载文档并初始化所有相关状态
     def load_file(self, path: Path) -> None:
-        self._document = self.parser.parse(path)
+        self._stop_pre_translation()
+        document = self.parser.parse(path)
+        #扫描页（无文本层）插入占位提示行：重排视图里照样占位，不静默丢内容
+        notices = make_ocr_notices(document.meta.get("needs_ocr_pages") or [])
+        document.blocks = segment_blocks(list(document.blocks) + notices)
+        self._document = document
         self.mapper.register_blocks(self._document.blocks)#注册文本块到映射器
         self.detector.reset() #重置眼动检测器
         self._locked_region = None #清空锁定区域
-        self.viewer.load_document(self._document) #视图层加载文档
+        self._locked_para_key = None
+        self.viewer.load_document(self._document) #视图层加载文档（首次绘制时回填 bbox）
         self._status_bar.showMessage(f"已加载: {path.name}")
+        self._start_pre_translation()
+
+    # ---- 预翻译 ----------------------------------------------------------
+    def _start_pre_translation(self) -> None:
+        cfg = self.config.translation
+        if not cfg.pre_translate:
+            return
+        segments = self.mapper.segments()[: max(cfg.pre_translate_max_segments, 0)]
+        if not segments:
+            return
+        # 必须与主窗口用同一个缓存库：预翻译写进去的，用户按空格时才能立刻命中
+        self._pre_translator = PreTranslator(
+            self._get_engine(), cfg, segments,
+            cache_path=self._cache.db_path,
+            parent=self,
+        )
+        self._pre_translator.progress.connect(self._on_pre_progress)
+        self._pre_translator.all_done.connect(
+            lambda: self._trans_label.setText("预翻译: 完成")
+        )
+        self._pre_translator.failed.connect(
+            lambda msg: self._status_bar.showMessage(f"预翻译中断: {msg}")
+        )
+        self._trans_label.setText(f"预翻译: 0/{len(segments)}")
+        self._pre_translator.start()
+
+    def _stop_pre_translation(self) -> None:
+        if self._pre_translator is None:
+            return
+        self._pre_translator.cancel()
+        self._pre_translator.wait(3000)
+        self._pre_translator.deleteLater()
+        self._pre_translator = None
+
+    def _resume_pre_translation(self) -> None:
+        if self._pre_translator is not None:
+            self._pre_translator.resume()
+
+    def _on_pre_progress(self, done: int, total: int) -> None:
+        #用户自己的翻译请求优先，别让预翻译进度盖掉它
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._trans_label.setText(f"预翻译: {done}/{total}")
 
     # ---- 视线 / 鼠标 -----------------------------------------------------
     def on_gaze_point(self, point: GazePoint) -> None:
@@ -510,8 +568,9 @@ class MainWindow(QMainWindow):
             hover_key = group.para_key if group else None #获取当前凝视所指的“段落键”
             
             #比较当前悬停的段落键与上一次记录的最后悬停键是否不同
-            if hover_key != self._last_hover_key: 
+            if hover_key != self._last_hover_key:
                 self._locked_region = None
+                self._locked_para_key = None
                 self.feedback.hide_region()
 
             self._last_hover_key = hover_key
@@ -543,6 +602,7 @@ class MainWindow(QMainWindow):
             )
 
         self._locked_region = region
+        self._locked_para_key = group.para_key if group is not None else None
         self.feedback.show_region(region)
         self.detector.reset()  # 0.8s 只触发一次：锁定后清窗重新计
 
@@ -572,6 +632,7 @@ class MainWindow(QMainWindow):
         self._translation_key = None
         self._translation_region = None
         self._trans_label.setText("翻译: 空闲")
+        self._resume_pre_translation()
 
     # ---- 翻译 ------------------------------------------------------------
     def _get_engine(self) -> TranslationEngine:
@@ -593,6 +654,7 @@ class MainWindow(QMainWindow):
         self._cache.put(key, result, file_hash=None)
         self._translation_key = None
         self._translation_region = None
+        self._resume_pre_translation()
     
     #隐藏浮层 + 状态栏报错（不写缓存）
     def _on_translation_failed(self, message: str) -> None:
@@ -602,6 +664,7 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage(f"翻译失败: {message}")
         self._translation_key = None
         self._translation_region = None
+        self._resume_pre_translation()
 
     def _trigger_translation(self, region: Region) -> None:
         origin = self.viewer.mapToGlobal(QPoint(0,0)) #将部件内本地坐标映射为全局屏幕坐标
@@ -611,25 +674,21 @@ class MainWindow(QMainWindow):
             w=region.w,
             h=region.h,
         )
-        #获取区域内的文本块
-        blocks = self.mapper.blocks_in_region(global_region)
-        if not blocks:
-            if not blocks:
-                self._status_bar.showMessage("未检测到可翻译文本")
+        #取译文源文本：段落模式走"段落文本唯一出处"（与预翻译同一函数、同一缓存键），
+        #点模式回退到区域内的 blocks
+        parts = None
+        if self._locked_para_key is not None:
+            parts = self.mapper.segment_key_parts(self._locked_para_key)
+        if parts is None:
+            parts = self.mapper.region_key_parts(global_region)
+        if parts is None:
+            self._status_bar.showMessage("未检测到可翻译文本")
             return
-        text = "".join(b.text for b in blocks)
+        text = parts[1]
         cfg = self.config.translation
-        
-        #唯一标识一条翻译缓存
-        key = CacheKey(
-            source_text = text,
-            source_lang = cfg.source_lang,
-            target_lang = cfg.target_lang,
-            backend=self._get_engine().name,
-            model=cfg.model,
-            page=blocks[0].page,
-            block_id=blocks[0].block_id
-        )
+
+        #唯一标识一条翻译缓存（与预翻译共用构造函数，键必然一致）
+        key = make_segment_key(parts, cfg, self._get_engine().name)
 
         #检查缓存（默认启用）
         cached = self._cache.get(key)
@@ -642,7 +701,11 @@ class MainWindow(QMainWindow):
             )
             self.viewer.set_scroll_locked(True)  # 浮层显示期间锁定滚动
             self._trans_label.setText(f"翻译: 缓存 {cached.elapsed_ms}ms")
+            self._resume_pre_translation()
             return
+        #用户请求优先：预翻译先让路，等这次翻完再继续
+        if self._pre_translator is not None:
+            self._pre_translator.pause()
         #启动工作线程
         if self._worker is None:
             self._worker = TranslationWorker(
