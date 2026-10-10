@@ -6,17 +6,18 @@ from typing import Any
 
 import cv2
 import numpy as np
-from eyetrax.calibration.common import compute_grid_points_from_shape
+from eyetrax.calibration.common import compute_grid_points
 from eyetrax.filters import KalmanEMASmoother, make_kalman
-from eyetrax.utils.screen import get_screen_size
+from mytraxcure.core.gaze.screen_utils import primary_screen_size
 from eyetrax.utils.video import open_camera
 
 # ---- 噪声微调（tune）参数 --------------------------------------------------
 # 本项目自建实现：eyetrax 的 KalmanSmoother.tune() 只测 3 个点，全屏方差估计太粗；
 # 改 .venv 里的包会被 pip 重装冲掉，所以在这里复刻同一套逻辑、只换注视点布局。
-_TUNE_GRID_ROWS = 3
-_TUNE_GRID_COLS = 3
-NOISE_TUNE_POINTS = _TUNE_GRID_ROWS * _TUNE_GRID_COLS  # 9：给 UI 提示用
+# 5 点（中心 + 四角）：覆盖范围与 9 点相同（四角就是同一组角点），
+# 但采集耗时减半，足够估计"同点内抖动"（每个点各自算方差再平均）。
+_TUNE_ORDER_5 = ((1, 1), (0, 0), (2, 0), (0, 2), (2, 2))
+NOISE_TUNE_POINTS = len(_TUNE_ORDER_5)  # 给 UI 提示用
 _TUNE_WINDOW = "Fine Tuning"
 _TUNE_PROXIMITY_RATIO = 1 / 5  # 命中半径 = 屏宽/5（与 eyetrax 一致）
 _TUNE_INITIAL_DELAY_S = 0.5    # 命中后先等视线稳定（与 eyetrax 一致）
@@ -24,17 +25,15 @@ _TUNE_COLLECT_S = 0.5          # 每点采集时长（与 eyetrax 一致）
 
 
 def _tune_points(sw: int, sh: int) -> list[tuple[int, int]]:
-    """3x3 网格，边距 10%（与校准 9 点同一覆盖范围）。"""
-    return compute_grid_points_from_shape(
-        _TUNE_GRID_ROWS, _TUNE_GRID_COLS, sw, sh, order="serpentine"
-    )
+    """5 点：中心 + 四角，边距 10%（与校准 5_point 模式同一覆盖范围）。"""
+    return compute_grid_points(_TUNE_ORDER_5, sw, sh)
 
 
 def _jitter_covariance(per_point_samples: list[list[list[float]]]) -> np.ndarray | None:
     """每点各自算方差再平均 → 测量噪声协方差（对角）。
 
     只统计"同一注视点内 predict 的波动"，所以不含注视点之间的间距：
-    若把所有点混起来算方差，量级会被屏幕布局主导（9 点约 7e5），卡尔曼被迫重度平滑
+    若把所有点混起来算方差，量级会被屏幕布局主导（全屏布局下约 7e5），卡尔曼被迫重度平滑
     （实测阶跃到 90% 要 11 帧，而同点抖动对应的 R 只要 2~4 帧）。
     少于 2 帧的点算不出方差，跳过；全都不足返回 None。
     """
@@ -53,11 +52,11 @@ def _jitter_covariance(per_point_samples: list[list[list[float]]]) -> np.ndarray
 def tune_noise(gaze_estimator, camera_index: int = 0) -> np.ndarray | None:
     """收集各注视点附近 predict 的抖动，返回测量噪声协方差（同点内抖动）；None = 取消/样本不足。
 
-    流程与 eyetrax 的 KalmanSmoother.tune() 相同：9 个绿点同时显示，视线进入某点
+    流程与 eyetrax 的 KalmanSmoother.tune() 相同：5 个绿点同时显示，视线进入某点
     命中半径后等 _TUNE_INITIAL_DELAY_S 稳定，再采集 _TUNE_COLLECT_S；点采够即消失。
     ESC 直接放弃（不写噪声协方差）。
     """
-    sw, sh = get_screen_size()
+    sw, sh = primary_screen_size()
     proximity = sw * _TUNE_PROXIMITY_RATIO
     states = [
         {"pos": pos, "start": None, "collecting": False, "collect_start": None, "samples": []}
@@ -156,7 +155,7 @@ class SmootherAdapter:
             self._smoother.kf.measurementNoiseCov = self._tuned_r.copy()
 
     def tune(self, gaze_estimator, camera_index: int = 0) -> bool:
-        """9 点噪声微调。返回 False = 被 ESC 取消或样本不足，滤波器参数保持不变。"""
+        """5 点噪声微调。返回 False = 被 ESC 取消或样本不足，滤波器参数保持不变。"""
         tuned_r = tune_noise(gaze_estimator, camera_index=camera_index)
         if tuned_r is None:
             return False

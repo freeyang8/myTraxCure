@@ -6,7 +6,7 @@ import time
 from enum import Enum, auto
 
 from eyetrax import GazeEstimator
-from eyetrax.utils.screen import get_screen_size
+from mytraxcure.core.gaze.screen_utils import primary_screen_size
 
 from mytraxcure.core.config import AppConfig, CalibrationConfig, GazeConfig
 from mytraxcure.core.gaze.calibration_runner import (
@@ -67,7 +67,7 @@ def run_and_save(
 
 def ensure_calibration(config: AppConfig | None = None) -> CalibrationOutcome:
     cfg = config or AppConfig()
-    sw, sh = get_screen_size()
+    sw, sh = primary_screen_size()
     env = CalibrationEnvironment(
         (sw, sh), camera_id=cfg.gaze.camera_index, user_id=cfg.user_id
     )

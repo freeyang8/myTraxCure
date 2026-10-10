@@ -24,7 +24,7 @@ from eyetrax.calibration.common import (
     wait_for_face_and_countdown,
 )
 from eyetrax.models import BaseModel, create_model
-from eyetrax.utils.screen import get_screen_size
+from mytraxcure.core.gaze.screen_utils import primary_screen_size
 from eyetrax.utils.video import open_camera
 
 from mytraxcure.core.config import CalibrationConfig, GazeConfig
@@ -33,14 +33,27 @@ from mytraxcure.core.config import CalibrationConfig, GazeConfig
 # （同一个 LinearSVR，仍是线性），真正的非线性只有 tiny_mlp。
 AUTO_MODEL_CANDIDATES: tuple[str, ...] = ("ridge", "elastic_net", "tiny_mlp")
 
-GRID_MODES: tuple[str, ...] = ("5_point", "9_point", "dense")
+GRID_MODES: tuple[str, ...] = ("5_point", "9_point", "14_point", "dense")
 DELEGATED_MODES: tuple[str, ...] = ("lissajous", "adaptive")
 
-_DEFAULT_MODE = "9_point"
+_DEFAULT_MODE = "14_point"
 _ORDER_5 = [(1, 1), (0, 0), (2, 0), (0, 2), (2, 2)]
 _ORDER_9 = [
     (1, 1), (0, 0), (2, 0), (0, 2), (2, 2), (1, 0), (0, 1), (2, 1), (1, 2),
 ]
+
+# 14 点布局（默认）：边距与其它模式一致（10%），所以最外圈坐标与 9 点/dense 完全相同。
+# 上/下两行各 4 点（含四角 + 内两列），中间两行各 3 点并向内收（0.2/0.5/0.8）——
+# 收进来是因为正文显示在窗口内（默认 1280x720 在屏幕左上角），把中间行的点放到
+# 屏幕最左/最右边缘等于采在不看的地方。8 种子实测（合成特征，中位误差）：
+# 覆盖区 9 点 4.90 / 14 点 2.63 / dense 2.11 px；窗口区 6.81 / 3.85 / 3.05 px。
+_GRID_MARGIN = 0.10
+_GRID_14 = (
+    (0.0, (0.0, 1 / 3, 2 / 3, 1.0)),
+    (1 / 3, (0.2, 0.5, 0.8)),
+    (2 / 3, (0.2, 0.5, 0.8)),
+    (1.0, (0.0, 1 / 3, 2 / 3, 1.0)),
+)
 _DENSE_ROWS, _DENSE_COLS = 5, 5
 _WINDOW_NAME = "Calibration"  # 与 wait_for_face_and_countdown 建的全屏窗口同名
 _PULSE_SECONDS = 0.8  # 点闪动提示（不开采），比 eyetrax 默认 1.0 略快
@@ -51,6 +64,7 @@ _CV_SEED = 0
 _MODE_LABELS = {
     "5_point": "5 点",
     "9_point": "9 点",
+    "14_point": "14 点",
     "dense": f"{_DENSE_ROWS * _DENSE_COLS} 点密集网格",
     "lissajous": "李萨如曲线",
     "adaptive": "自适应（9 点 + 60 随机点）",
@@ -111,9 +125,22 @@ class CalibrationReport:
 
 
 # ---- 采集 ------------------------------------------------------------------
+def _points_14(sw: int, sh: int) -> list[tuple[int, int]]:
+    """14 点布局：按 _GRID_14 的比例映射到 10% 边距内的区域，行序即采集顺序。"""
+    mx, my = int(sw * _GRID_MARGIN), int(sh * _GRID_MARGIN)
+    gw, gh = sw - 2 * mx, sh - 2 * my
+    return [
+        (mx + int(fx * gw), my + int(fy * gh))
+        for fy, xs in _GRID_14
+        for fx in xs
+    ]
+
+
 def _grid_points(mode: str, sw: int, sh: int) -> list[tuple[int, int]]:
     if mode == "5_point":
         return compute_grid_points(_ORDER_5, sw, sh)
+    if mode == "14_point":
+        return _points_14(sw, sh)
     if mode == "9_point":
         return compute_grid_points(_ORDER_9, sw, sh)
     return compute_grid_points_from_shape(
@@ -214,7 +241,7 @@ def collect_grid_samples(
     max_head_angle_deg: float,
 ) -> SampleSet | None:
     """采集一次网格校准样本。返回 None = ESC 取消 / 无有效帧。"""
-    sw, sh = get_screen_size()
+    sw, sh = primary_screen_size()
     cap = open_camera(camera_index)
     try:
         if not wait_for_face_and_countdown(cap, estimator, sw, sh, _COUNTDOWN_SECONDS):
@@ -376,7 +403,7 @@ def run_calibration(
         requested = "auto"
 
     if mode in GRID_MODES:
-        sw, sh = get_screen_size()
+        sw, sh = primary_screen_size()
         samples = collect_grid_samples(
             estimator,
             _grid_points(mode, sw, sh),

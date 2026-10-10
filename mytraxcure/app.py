@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 
+def _center_on_screen(window) -> None:
+    """把窗口挪到当前屏幕可用区域的中心（默认位置在左上角，阅读时偏头太累）。"""
+    from PyQt6.QtGui import QGuiApplication
+
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return
+    geo = screen.availableGeometry()
+    window.move(geo.center() - window.rect().center())
+
+
 def run() -> int:
     import sys
 
@@ -36,7 +47,8 @@ def run() -> int:
     if outcome is CalibrationOutcome.FALLBACK:
         window.statusBar().showMessage("未校准：已降级为鼠标模式（重启可重新校准）")
     
-    window.resize(1280, 720)
+    window.resize(1280, 787)  # 逐句步进在该窗口高度下的实测容量为 2 句/屏
+    _center_on_screen(window)  # 别让它停在左上角
     window.show()
     
     # 启动默认进入眼动模式；FALLBACK（无可用校准）保持鼠标降级。

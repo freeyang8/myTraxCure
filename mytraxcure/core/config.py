@@ -41,6 +41,10 @@ class GazeConfig:
     # 命中容差：tolerance = min(校准中位误差, block_h * tolerance_ratio_of_block_h)
     hit_tolerance_px: float = 100.0  # 首选命中容差（v6：校准误差不可获取，恒用默认值）
     tolerance_ratio_of_block_h: float = 0.7  # 最近块回退容差的块高占比
+    # 逐句模式的请求容差：比连续滚动大得多（大字号 + 一句话就是目标）。
+    # 实际取值还会被"到相邻句空隙的一半"夹住（TextBlock.hit_pad_max），
+    # 所以给多大都行——相邻句的命中域不会相交，不会点错句
+    step_hit_tolerance_px: float = 200.0
 
     # 点模式阈值
     max_variance_px: float = 60.0
@@ -102,10 +106,26 @@ class TranslationConfig:
     pre_translate_max_segments: int = 30  # 单次最多预翻译多少段，避免整本书跑满本地模型
 
 @dataclass
+class ReadingConfig:
+
+    # 逐句步进阅读：一屏只放能完整显示的 N 句，滚轮一次走一句（N 按窗口高度算）。
+    # 默认值取自原型 tools/step_reader_prototype.html 在 1280x787 窗口实测的一组参数
+    step_mode: bool = True       # 启动即进逐句步进；菜单里可切回连续滚动
+    font_px: int = 44            # 字号（像素）
+    line_height_em: float = 2.5  # 行高（倍字号）
+    gap_em: float = 2.9          # 段间距目标值：先按它求 N，剩余空间再均分进去
+    max_gap_em: float = 6.0      # 段间距上限，超出的空间转成上下居中留白
+    min_font_px: int = 16        # 超长句缩字号的保留下限
+    margin_x_min: int = 40       # 左右边距下限（像素）
+    margin_x_vw: float = 0.06    # 左右边距（视口宽的占比）
+    margin_y: int = 24           # 上下边距（像素）
+
+
+@dataclass
 class CalibrationConfig:
 
-    # 5_point / 9_point / dense（5x5=25 点）/ lissajous / adaptive
-    mode: str = "dense"
+    # 5_point / 9_point / 14_point（默认）/ dense（5x5=25 点）/ lissajous / adaptive
+    mode: str = "14_point"
     # 每个点的采集时长（秒），网格模式生效；脉冲提示固定 0.8s 不计入
     sample_seconds_per_point: float = 1.5
     # 每点样本数下限，低于只告警不失败（眨眼/丢脸会导致帧数偏少）
@@ -118,6 +138,7 @@ class AppConfig:
     region: RegionConfig = field(default_factory=RegionConfig)
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    reading: ReadingConfig = field(default_factory=ReadingConfig)
 
     user_id: str = "default"
 
@@ -143,6 +164,7 @@ class AppConfig:
             region=RegionConfig(**merged["region"]),
             translation=TranslationConfig(**merged["translation"]),
             calibration=CalibrationConfig(**merged["calibration"]),
+            reading=ReadingConfig(**merged["reading"]),
             user_id=merged["user_id"],
         )
 

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "step-reader",
+      "runtimeExecutable": "E:\\Download\\temp\\myTraxCure\\myTraxCure\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "http.server", "8765", "--directory", "E:\\Download\\temp\\myTraxCure\\myTraxCure\\tools"],
+      "port": 8765
+    }
+  ]
+}

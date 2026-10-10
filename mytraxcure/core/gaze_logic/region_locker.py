@@ -59,11 +59,16 @@ class RegionLocker:
         self,
         screen_region: Region,
         bounds: tuple[int, int, int, int] | None = None,
+        max_size: tuple[int, int] | None = None,
     ) -> Region | None:
         cfg = self.config
+        # max_size：按阅读模式覆盖上限。逐句模式字号大得多，一句就能超过
+        # 配置里的 max_width/max_height，照配置判会把整句错判成"整页一大块"
+        max_w = cfg.max_width if max_size is None else int(max_size[0])
+        max_h = cfg.max_height if max_size is None else int(max_size[1])
 
         # 1. 尺寸上限校验：超限 = "整页一大块"，由上层回退点模式
-        if screen_region.w > cfg.max_width or screen_region.h > cfg.max_height:
+        if screen_region.w > max_w or screen_region.h > max_h:
             return None
 
         x, y = screen_region.x, screen_region.y

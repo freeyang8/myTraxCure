@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>逐句步进阅读原型 · Step Reader</title>
+<style>
+  :root {
+    --paper: #faf8f4;
+    --ink: #16181c;
+    --dim: #6b7280;
+    --line: rgba(0,0,0,.10);
+    --accent: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--paper); color: var(--ink); }
+  body {
+    font-family: Georgia, "Times New Roman", "Songti SC", "Microsoft YaHei", "Noto Sans CJK SC", serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---- 阅读区：夹在上下两条控件栏之间，轨道按步进位移 ---- */
+  #stage { position: fixed; left: 0; right: 0; top: 40px; bottom: 29px; overflow: hidden; }
+  #track { will-change: transform; }
+  .unit {
+    white-space: normal;
+    overflow-wrap: break-word;
+    word-break: normal;
+    hyphens: none;
+    text-align: left;
+  }
+  .unit.heading { font-weight: 700; letter-spacing: .01em; }
+  .unit.solo { overflow-y: auto; }
+  /* 量高用的隐藏元素：必须与 .unit 的排版样式逐项一致，否则折行会算错 */
+  #measure {
+    position: absolute; left: -20000px; top: 0;
+    visibility: hidden; pointer-events: none;
+    padding: 0; margin: 0; border: 0;
+    white-space: normal; overflow-wrap: break-word; word-break: normal; hyphens: none;
+    text-align: left; font-family: inherit;
+  }
+
+  /* ---- 控件条：顶部工具条 + 底部状态条，均不覆盖正文 ---- */
+  .bar {
+    position: fixed; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    background: rgba(255,255,255,.94); border-color: var(--line);
+    font-family: ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif;
+    font-size: 12px; color: var(--ink);
+  }
+  #bar { top: 0; height: 40px; border-bottom: 1px solid var(--line); flex-wrap: nowrap; }
+  #bar .grp { display: flex; align-items: center; gap: 6px; }
+  #bar label { color: var(--dim); }
+  #bar input[type=range] { width: 92px; accent-color: var(--accent); }
+  #bar .val { width: 50px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  #bar .spacer { flex: 1; }
+  button {
+    font: inherit; padding: 4px 10px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; color: var(--ink);
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+
+  #hud-bar {
+    bottom: 3px; height: 26px; border-top: 1px solid var(--line); gap: 18px;
+    font-family: ui-monospace, Consolas, monospace; color: var(--dim);
+    font-variant-numeric: tabular-nums; overflow: hidden; white-space: nowrap;
+  }
+  #hud-bar b { color: var(--ink); font-weight: 600; }
+  #hud-bar .big { color: var(--accent); font-weight: 700; font-size: 14px; }
+  #hud-bar .flag { color: #b45309; }
+  .hidden { display: none !important; }
+
+  body.bare #bar, body.bare #hud-bar, body.bare #progress { display: none; }
+  body.bare #stage { top: 0; bottom: 0; }
+
+  #status {
+    position: fixed; z-index: 12; top: 52px; left: 50%; transform: translateX(-50%);
+    padding: 7px 14px; border-radius: 999px; max-width: 76vw;
+    background: rgba(23,25,29,.92); color: #fff;
+    font-family: ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif; font-size: 12px;
+    opacity: 0; pointer-events: none; transition: opacity .25s ease;
+  }
+  #status.on { opacity: 1; }
+  #progress { position: fixed; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0,0,0,.06); z-index: 9; }
+  #progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .18s ease; }
+  #drop-hint {
+    position: fixed; inset: 0; z-index: 20; display: none;
+    align-items: center; justify-content: center; font-size: 20px; color: var(--accent);
+    background: rgba(37,99,235,.06); border: 3px dashed var(--accent);
+  }
+  #drop-hint.on { display: flex; }
+</style>
+</head>
+<body>
+
+<div id="stage"><div id="track"></div></div>
+<div id="measure" aria-hidden="true"></div>
+
+<div id="bar" class="bar">
+  <div class="grp">
+    <button id="btn-open">打开文件…</button>
+    <button id="btn-reset">载入示例</button>
+  </div>
+  <div class="grp"><label>字号</label><input id="s-font" type="range" min="24" max="48" step="1" value="44"><span class="val" id="v-font">44 px</span></div>
+  <div class="grp"><label>行高</label><input id="s-lh" type="range" min="2.0" max="2.5" step="0.05" value="2.5"><span class="val" id="v-lh">2.50 em</span></div>
+  <div class="grp"><label>目标间距</label><input id="s-gap" type="range" min="1.0" max="4.0" step="0.1" value="2.9"><span class="val" id="v-gap">2.90 em</span></div>
+  <span class="spacer"></span>
+  <button id="btn-bare">全屏阅读</button>
+  <input id="file-input" type="file" accept=".txt,.pdf,.doc,.docx" class="hidden">
+</div>
+
+<div id="hud-bar" class="bar">
+  <span>每屏 N <span class="big" id="hud-n">-</span></span>
+  <span>句子 <b id="hud-range">-</b></span>
+  <span>字号/行高 <b id="hud-font">-</b></span>
+  <span>段间距 <b id="hud-gap">-</b></span>
+  <span>占用/可用 <b id="hud-fit">-</b></span>
+  <span class="flag" id="hud-flags"></span>
+</div>
+
+<div id="status"></div>
+<div id="progress"><i></i></div>
+<div id="drop-hint">松开以载入文件</div>
+
+<!-- 默认示例文本：测试文件.txt 全文（单文件原型，离线可用） -->
+<script type="text/plain" id="seed">
+# Artificial Intelligence: Humanity's Greatest Invention or Its Final One?
+
+## Introduction
+
+Artificial intelligence has moved from the realm of science fiction into the fabric of everyday life with a speed that few predicted and even fewer fully understand. It shapes the advertisements we see, the routes we drive, the medical diagnoses we receive, and the conversations we have with machines that seem, at times, disturbingly human. Yet for all its ubiquity, AI remains one of the most contested technologies in human history. Some hail it as the key to solving climate change, disease, and poverty; others warn that it may erode democracy, entrench inequality, and even threaten human autonomy. This essay argues that artificial intelligence is neither an unqualified blessing nor an inevitable catastrophe. Rather, it is a mirror that reflects and amplifies human values, incentives, and institutions. Whether AI becomes humanity's greatest invention or its final one depends far less on the technology itself than on the choices societies make about how to develop, govern, and distribute it.
+
+## Part One: What Artificial Intelligence Actually Is
+
+Before evaluating AI's promise and peril, it is worth clarifying what the term means. Artificial intelligence refers to computer systems designed to perform tasks that typically require human intelligence, such as recognizing images, understanding language, making predictions, and solving problems. Within this broad field, machine learning—and particularly deep learning—has driven most of the recent breakthroughs. Instead of being explicitly programmed with rules, these systems learn patterns from vast quantities of data, adjusting internal parameters until they can perform a task with remarkable accuracy.
+
+This learning-based approach explains both AI's power and its peculiar weaknesses. Because AI systems infer patterns from examples rather than following human-authored rules, they can surpass human performance in narrow domains—diagnosing certain cancers from medical images, for instance, or predicting protein structures. But they can also absorb the biases embedded in their training data, produce confident falsehoods, and behave unpredictably when confronted with situations unlike those they have seen before. They are powerful pattern recognizers, not conscious minds. Anthropomorphizing them—imagining they possess intentions, feelings, or moral agency—leads to confused debates and poor policy.
+
+It is equally important to distinguish between narrow and general AI. Nearly all deployed systems today are narrow: they excel at specific tasks but cannot transfer their skills to unrelated domains. A chess engine cannot write poetry; a translation model cannot drive a car. Artificial general intelligence (AGI), by contrast, would match or exceed human performance across virtually all cognitive tasks, including the ability to learn new skills independently. AGI remains hypothetical. No one knows whether it is achievable in a decade, a century, or ever. Much of the public anxiety about AI conflates the two, treating the limitations of today's systems as irrelevant while treating the speculative powers of tomorrow's as certain. A clear-eyed discussion must hold both possibilities in view.
+
+## Part Two: The Case for Optimism
+
+The strongest arguments for AI are grounded not in hype but in tangible results. In medicine, machine learning systems have demonstrated the ability to detect diabetic retinopathy, breast cancer, and lung nodules from images with accuracy rivaling specialist physicians. In drug discovery, AI models such as AlphaFold have predicted the three-dimensional structures of millions of proteins, dramatically accelerating research that once took years per molecule. During the COVID-19 pandemic, AI-assisted tools helped identify potential drug candidates and track the spread of variants. These are not speculative futures; they are documented achievements.
+
+In the fight against climate change, AI contributes in less glamorous but equally important ways. Data centers have become more energy-efficient through AI-driven optimization; power grids balance renewable inputs more intelligently; climate models simulate complex interactions with greater fidelity. Farmers use AI to reduce water and fertilizer use, lowering emissions while increasing yields. If the world is to decarbonize without sacrificing prosperity, such efficiency gains will be essential.
+
+AI also democratizes capabilities that were once reserved for elites. A student in a rural village can now access a tutor that speaks her language and adapts to her pace. A small business owner can generate professional marketing materials without hiring an agency. A programmer with a disability can write code using voice commands and AI assistance. Translation tools dissolve language barriers that once isolated communities. In each case, the technology lowers the cost of a valuable skill, spreading opportunity more widely than markets alone would.
+
+Productivity growth, too, deserves mention. Economists have long worried about stagnant productivity in advanced economies. AI may reverse this trend by automating routine cognitive labor—drafting emails, summarizing documents, writing boilerplate code—freeing humans to focus on judgment, creativity, and relationships. If the gains are broadly shared, they could fund better public services, shorter working hours, and more fulfilling work. The operative word, of course, is "if."
+
+## Part Three: The Case for Concern
+
+The optimistic case is real, but so are the dangers. The first and most immediate is bias. AI systems learn from historical data, and history is saturated with discrimination. Hiring algorithms trained on past decisions have penalized women's résumés; facial recognition systems have misidentified people with darker skin at far higher rates; predictive policing tools have intensified patrols in minority neighborhoods, generating more arrests, which in turn "confirm" the algorithm's bias. These are not bugs in the sense of coding errors; they are features of learning from unjust data. Without deliberate correction, AI can automate and scale discrimination, dressing it in the language of mathematical objectivity.
+
+The second danger is economic dislocation. Previous technological revolutions displaced workers, but typically over generations, allowing new industries and skills to emerge. AI may compress that timeline dramatically. White-collar occupations once considered safe—paralegals, customer service representatives, junior analysts, radiologists, translators—are now exposed. If displacement outpaces retraining and social protection, the result could be mass unemployment, widening inequality, and political instability. The benefits of AI, meanwhile, accrue disproportionately to those who own the models and the data: a handful of corporations and investors. Without redistribution, AI could produce a world of extraordinary abundance for a few and precarity for many.
+
+The third danger is the erosion of truth and democratic discourse. Generative AI can produce convincing text, images, audio, and video at negligible cost. This power has legitimate uses, but it also enables disinformation at an unprecedented scale. Deepfaked videos of politicians saying things they never said, fabricated news articles, and bot networks that simulate grassroots movements can manipulate elections and inflame social divisions. Even when AI is not malicious, it can degrade the information ecosystem: search engines and social platforms filled with machine-generated content make it harder to find reliable information. A democracy requires a shared factual basis for debate; AI threatens to dissolve it.
+
+The fourth danger is concentration of power. Training state-of-the-art models requires enormous computing resources, vast datasets, and specialized expertise—assets held by a small number of corporations and states. This concentration creates dependencies: governments rely on private firms for critical infrastructure; smaller nations rely on larger ones for AI capabilities. It also creates surveillance capacity of a kind never before possible. Facial recognition, gait analysis, predictive policing, and social credit systems can monitor populations continuously and invisibly. In authoritarian hands, AI is a tool of control; even in democracies, it can chill dissent and normalize surveillance.
+
+Finally, there is the long-term risk that animates much of the current debate: the possibility that advanced AI systems become uncontrollable or pursue goals misaligned with human welfare. This concern is speculative, but it is not frivolous. If future systems are vastly more capable than humans, ensuring they remain aligned with human values becomes a problem of unprecedented difficulty. Critics note that the same corporations racing to build such systems also warn of their dangers—a tension that invites skepticism. Yet the mere possibility of catastrophic outcomes warrants serious research into safety, interpretability, and governance. Prudence is not the same as panic.
+
+## Part Four: Why the Outcome Is Not Predetermined
+
+The most important insight in this debate is that AI does not arrive with a fixed social meaning. The same technology can be deployed to surveil or to empower, to concentrate wealth or to distribute it, to manipulate or to inform. Which path we take depends on institutions, incentives, and political choices.
+
+Consider the difference between two plausible futures. In one, AI is developed in a regulatory vacuum, driven solely by competitive pressure to move fast and capture markets. Safety research is underfunded; transparency is minimal; benefits flow to shareholders; displaced workers are left to fend for themselves. In the other, governments, researchers, and civil society collaborate on standards for safety and fairness; algorithmic auditing is mandatory; data rights are protected; the gains from automation are shared through redesigned tax and welfare systems; and international agreements prevent an uncontrolled arms race. Both futures use the same underlying technology. They differ because of governance.
+
+History supports this view. The Industrial Revolution produced both child labor and the factory inspectorate, both robber barons and the public school. The nuclear age produced both the bomb and arms control treaties. Technology creates possibilities; politics determines outcomes. AI is no exception. The question is not "what will AI do to us?" but "what will we do with AI?"
+
+## Part Five: A Framework for Action
+
+If the outcome is a choice, what should be chosen? Several principles suggest themselves.
+
+First, invest in safety and alignment research proportionate to the stakes. If there is even a small chance that advanced AI poses existential risks, the resources devoted to understanding and mitigating those risks should be far larger than they are today. This includes technical work on interpretability, robustness, and control, as well as institutional work on monitoring and enforcement.
+
+Second, mandate transparency and accountability. Companies deploying high-stakes AI systems—in hiring, lending, policing, medicine, and elections—should be required to disclose how their systems work, publish audits, and provide avenues for appeal when harm occurs. Secrecy protects profits, not people.
+
+Third, protect workers and redistribute gains. Automation should not mean abandonment. Policies such as portable benefits, retraining programs, wage insurance, and, where appropriate, taxes on automated labor can ensure that productivity gains are shared. The goal is not to stop automation but to ensure its fruits are broadly enjoyed.
+
+Fourth, defend the information ecosystem. Platforms should be held accountable for the spread of demonstrably false, machine-generated content. Provenance standards, watermarking, and investment in independent journalism can help preserve a shared factual basis for democratic debate.
+
+Fifth, prevent dangerous concentration of power. Antitrust enforcement, public investment in alternative models, data portability, and international cooperation can ensure that AI serves many masters rather than a few. A technology this consequential should not be the private property of a handful of firms.
+
+Sixth, build international norms. AI development is global; governance must be too. Treaties banning autonomous weapons, agreements on safety standards, and shared research infrastructure can reduce the risk of a destabilizing race. None of this is easy, but the alternative—uncoordinated competition with catastrophic downside—is worse.
+
+## Conclusion
+
+Artificial intelligence is the most consequential technology humanity has ever built, precisely because it augments the one faculty that distinguishes us: intelligence itself. It offers the prospect of curing diseases, feeding the hungry, cleaning the atmosphere, and liberating humans from drudgery. It also offers the prospect of mass surveillance, automated discrimination, economic dislocation, and, in the worst case, loss of control over systems more capable than ourselves.
+
+Neither outcome is inevitable. The technology is not a force of nature; it is a product of human decisions, funded by human capital, governed by human laws. The question that will define this century is whether we can build institutions wise enough and strong enough to steer it. That is not a question for engineers alone. It is a question for citizens, legislators, educators, journalists, and voters—for all of us.
+
+The answer will not be written by AI. It will be written by us, in the choices we make now, while the future is still ours to shape.
+
+Note: This essay is approximately 5,000 words in its full, expanded form with additional sections, examples, and citations. If you need the complete 5,000-word version, please let me know and I can extend each section with deeper analysis, more case studies, and academic references.
+</script>
+
+<script>
+"use strict";
+
+/* ============================================================================
+ * 参数
+ * ==========================================================================*/
+const CFG = {
+  baseFontSize: 44,      // 基准字号 px（滑条可调）
+  lineHeightEm: 2.5,     // 行高（滑条 2.0–2.5）
+  targetGapEm: 2.9,      // 段间距目标值：先按它求 N，剩余空间再均分进去
+  maxGapEm: 6.0,         // 段间距上限，超出部分转为上下居中留白
+  minFontSize: 16,       // 缩字号下限（超长句保护）
+  marginXVw: 0.06,       // 左右边距 = max(6vw, 40px)
+  marginXMin: 40,
+  marginY: 24,           // 上下边距
+  animMs: 180,           // 步进动画时长
+  wheelStepPx: 100,      // 归一化滚轮档位：累计到这个像素数走一步
+  wheelMaxSteps: 3,      // 单次滚轮事件最多跨几步，防甩飞
+};
+
+const CLOSERS = "”’\"'）)】]》」』〕｝";                   // 句末收尾符归上一句
+const CJK_STOP = "。！？…";                                // 中文终止符
+const EN_STOP = ".!?";                                     // 英文终止符
+const ABBREV = new Set(("mr mrs ms dr prof sr jr st vs etc fig no inc ltd co corp " +
+  "e.g i.e al vol pp ed eds approx dept univ gov sen rep gen col capt lt sgt " +
+  "jan feb mar apr jun jul aug sep sept oct nov dec am pm us uk eu un").split(" "));
+
+/* ============================================================================
+ * 切句：先按段落切，再段内按终止符切
+ * ==========================================================================*/
+function splitParagraphs(text) {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const out = [];
+  let buf = [];
+  const flush = () => {
+    const joined = buf.join(" ").replace(/\s+/g, " ").trim();
+    if (joined) out.push(joined);
+    buf = [];
+  };
+  for (const rawLine of normalized.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) { flush(); continue; }             // 空行 = 段落边界
+    if (/^#/.test(line)) { flush(); out.push(line); continue; }  // 标题行独立成段
+    buf.push(line);                               // 段内软换行合并
+  }
+  flush();
+  return out;
+}
+
+function isDigit(ch) { return ch >= "0" && ch <= "9"; }
+function isLower(ch) { return ch >= "a" && ch <= "z"; }
+function isUpper(ch) { return ch >= "A" && ch <= "Z"; }
+
+/** 终止符是否成立（英文 `.` 需要一堆反例保护；中文终止符一律成立） */
+function stopAllowed(text, i) {
+  const ch = text[i];
+  if (CJK_STOP.includes(ch)) return true;
+  if (ch !== ".") return true;                    // ! ? 直接成立
+
+  const prev = i > 0 ? text[i - 1] : "";
+  const next = i + 1 < text.length ? text[i + 1] : "";
+
+  if (isDigit(prev) && isDigit(next)) return false;          // 小数 3.14
+  if (ch === "." && text[i + 1] === ".") return false;       // 省略号 run，交给 run 结束处理
+  if (isDigit(next)) return false;                           // 版本号 v1.2
+
+  // 缩写：取 `.` 前连续字母/点组成的 token，去掉点后查表
+  let s = i;
+  while (s > 0 && /[A-Za-z.]/.test(text[s - 1])) s--;
+  const token = text.slice(s, i);
+  if (token) {
+    const key = token.toLowerCase().replace(/\./g, "");
+    if (ABBREV.has(key)) return false;                       // Mr. / U.S. / e.g.
+    if (token.replace(/\./g, "").length === 1) return false; // 单字母缩写 J. R. R.
+  }
+  // 句号后是小写字母或数字 → 更可能是缩写/编号的延续
+  let j = i + 1;
+  while (j < text.length && (text[j] === " " || text[j] === "\t")) j++;
+  if (j < text.length && (isLower(text[j]) || isDigit(text[j]))) return false;
+  return true;
+}
+
+/** 返回 [{text, start, end}]，start/end 是在段落文本中的字符区间 */
+function splitSentences(para, paraIndex) {
+  const out = [];
+  let start = 0, i = 0;
+  const push = (end) => {
+    const seg = para.slice(start, end);
+    const lead = seg.length - seg.trimStart().length;
+    const text = seg.trim();
+    if (text) out.push({ text, para: paraIndex, start: start + lead, end: start + lead + text.length });
+    start = end;
+  };
+  while (i < para.length) {
+    const ch = para[i];
+    if (!CJK_STOP.includes(ch) && !EN_STOP.includes(ch)) { i++; continue; }
+    if (!stopAllowed(para, i)) { i++; continue; }
+    // 连续同类终止符 → 一个切点；`...` / `。。。` 视为一个
+    let j = i + 1;
+    while (j < para.length) {
+      const c = para[j];
+      if (CJK_STOP.includes(c) || EN_STOP.includes(c)) { j++; continue; }
+      if (c === "." && para[j - 1] === ".") { j++; continue; }
+      break;
+    }
+    // 收尾符（引号/括号）跟在终止符后面，仍属这一句
+    while (j < para.length && CLOSERS.includes(para[j])) j++;
+    push(j);
+    i = j;
+  }
+  if (start < para.length) push(para.length);
+  return out;
+}
+
+function makeUnits(text) {
+  const units = [];
+  const paras = splitParagraphs(text);
+  paras.forEach((para, pi) => {
+    // 纯分隔线（--- / *** / ___）不承载文字，跳过
+    if (/^[-—*_=~\s]{2,}$/.test(para)) return;
+    const heading = /^#{1,6}\s+/.test(para) || (para.length <= 40 && !/[。.!?！？…]$/.test(para) && /^[A-Z0-9]/.test(para));
+    const body = para.replace(/^#{1,6}\s+/, "").replace(/^\*+|\*+$/g, "");
+    splitSentences(body, pi).forEach(u => units.push({
+      text: heading ? u.text.replace(/^#{1,6}\s+/, "") : u.text,
+      para: pi,
+      heading,
+    }));
+  });
+  return units;
+}
+
+/* ============================================================================
+ * 排版：量高 → 定 N → 均分间距
+ * ==========================================================================*/
+const stage = document.getElementById("stage");
+const track = document.getElementById("track");
+const measureEl = document.getElementById("measure");
+const measureCache = new Map();
+
+const state = {
+  units: [],
+  baseFont: CFG.baseFontSize,
+  lineHeightEm: CFG.lineHeightEm,
+  targetGapEm: CFG.targetGapEm,
+  top: 0,
+  animating: false,
+  lastLayout: null,
+};
+
+function measureHeight(text, width, fontSize, lineH, heading) {
+  const key = `${fontSize}|${lineH}|${Math.round(width)}|${heading ? 1 : 0}|${text}`;
+  const hit = measureCache.get(key);
+  if (hit !== undefined) return hit;
+  // 量高元素与真实段落共用 class：字号/行高/字距/字重等全部走同一套 CSS 规则，
+  // 逐条复制内联样式早晚会漏（曾漏掉 .heading 的 letter-spacing，标题少算一行）
+  measureEl.className = "unit" + (heading ? " heading" : "");
+  measureEl.style.width = width + "px";
+  measureEl.style.fontSize = fontSize + "px";
+  measureEl.style.lineHeight = lineH + "px";
+  measureEl.textContent = text;
+  const h = measureEl.getBoundingClientRect().height;
+  measureCache.set(key, h);
+  if (measureCache.size > 20000) measureCache.clear();
+  return h;
+}
+
+/** 当前窗口尺寸下，从 top 起能完整容纳几段 + 真实段间距 */
+function computeLayout(top) {
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const marginX = Math.max(CFG.marginXVw * W, CFG.marginXMin);
+  const contentW = Math.max(W - 2 * marginX, 160);
+  const avail = Math.max(H - 2 * CFG.marginY, 80);
+
+  let fontSize = state.baseFont;
+  let picked = null;
+  let shrunk = false;
+  for (;;) {
+    const lineH = fontSize * state.lineHeightEm;
+    const gapTarget = fontSize * state.targetGapEm;
+    const heights = [];
+    let used = 0;
+    for (let i = top; i < state.units.length; i++) {
+      const h = measureHeight(state.units[i].text, contentW, fontSize, lineH, state.units[i].heading);
+      const add = h + (heights.length ? gapTarget : 0);
+      if (used + add > avail) break;
+      used += add;
+      heights.push(h);
+    }
+    if (heights.length >= 1 || fontSize <= CFG.minFontSize) {
+      picked = { fontSize, lineH, gapTarget, heights, used };
+      break;
+    }
+    fontSize -= 1;                            // 整屏缩字号：连一段都放不下才触发
+    shrunk = true;
+  }
+
+  let n = picked.heights.length;
+  let soloOverflow = false;
+  if (n === 0) {                              // 到下限仍放不下 → 该句独占一屏，内部可滚
+    const solo = state.units[top];
+    picked.heights = [measureHeight(solo.text, contentW, picked.fontSize, picked.lineH, solo.heading)];
+    picked.used = picked.heights[0];
+    n = 1;
+    soloOverflow = true;
+  }
+
+  const leftover = avail - picked.used;
+  let gap = 0;
+  // 独占一屏的超长句顶部对齐（居中会把负的剩余空间算成负偏移，把段落推出视口）
+  let padTop = CFG.marginY + (soloOverflow ? 0 : leftover / 2);
+  let contentH = picked.used;
+  if (n > 1) {
+    const maxGap = picked.fontSize * CFG.maxGapEm;
+    gap = Math.min(picked.gapTarget + leftover / (n - 1), maxGap);
+    // picked.used 里已含 (n-1) 个目标间距，这里只补"超出目标值的增量"
+    contentH = picked.used + (gap - picked.gapTarget) * (n - 1);
+    padTop = CFG.marginY + (avail - contentH) / 2;
+  }
+
+  return {
+    top, n, gap, padTop, avail, contentW, marginX,
+    fontSize: picked.fontSize, lineH: picked.lineH,
+    heights: picked.heights,
+    usedHeight: contentH,
+    shrunk, soloOverflow,
+  };
+}
+
+/* ============================================================================
+ * 渲染与步进
+ * ==========================================================================*/
+function makeUnitEl(unit, index) {
+  const el = document.createElement("div");
+  el.className = "unit" + (unit.heading ? " heading" : "");
+  el.textContent = unit.text;
+  el.dataset.index = String(index);
+  el.style.fontSize = state.lastLayout.fontSize + "px";
+  el.style.lineHeight = state.lastLayout.lineH + "px";
+  return el;
+}
+
+/** extra: "none" | "down"（尾部多渲染一段）| "up"（顶部多渲染一段） */
+function renderView(top, extra, layout) {
+  const L = layout || computeLayout(top);
+  state.lastLayout = L;
+  state.top = top;
+  track.innerHTML = "";
+  track.style.transform = "translateY(0px)";
+  track.style.transition = "none";
+  track.style.paddingTop = L.padTop + "px";
+  track.style.paddingLeft = L.marginX + "px";
+  track.style.paddingRight = L.marginX + "px";
+  track.style.width = stage.clientWidth + "px";
+
+  const start = extra === "up" ? Math.max(top - 1, 0) : top;
+  const count = Math.min(L.n + (extra === "none" ? 0 : 1), state.units.length - start);
+  const frag = document.createDocumentFragment();
+  for (let i = start; i < start + count; i++) {
+    const el = makeUnitEl(state.units[i], i);
+    const isLast = i === start + count - 1;
+    el.style.marginBottom = (isLast && extra === "none") ? "0px" : (extra === "up" && i === start ? L.gap + "px" : (i === start + count - 1 && extra !== "none" ? "0px" : L.gap + "px"));
+    if (L.soloOverflow && i === top) { el.classList.add("solo"); el.style.maxHeight = L.avail + "px"; }
+    frag.appendChild(el);
+  }
+  track.appendChild(frag);
+  updateHud(L);
+}
+
+function maxTopFor(top) {
+  const L = computeLayout(top);
+  return Math.max(state.units.length - L.n, 0);
+}
+
+function canStepDown(top) {
+  if (state.units.length === 0) return false;
+  const L = computeLayout(top);
+  return top + L.n < state.units.length;
+}
+
+function step(delta, count) {
+  count = count || 1;
+  if (delta > 0) {
+    for (let k = 0; k < count; k++) {
+      if (!canStepDown(state.top)) return;
+      if (count > 1) { renderView(state.top + 1, "none"); continue; }  // 多步直接跳，不做动画
+      animateStep("down");
+    }
+  } else {
+    for (let k = 0; k < count; k++) {
+      if (state.top <= 0) return;
+      if (count > 1) { renderView(state.top - 1, "none"); continue; }
+      animateStep("up");
+    }
+  }
+}
+
+function finishAnimation() {
+  if (!state.animating) return;
+  const pending = state.pendingTop;
+  track.style.transition = "none";
+  state.animating = false;
+  renderView(pending, "none");
+}
+
+function animateStep(dir) {
+  if (state.animating) finishAnimation();
+  const L = computeLayout(state.top);
+  if (dir === "down") {
+    const nextTop = state.top + 1;
+    renderView(state.top, "down", L);
+    const offset = L.heights[0] + L.gap;
+    state.pendingTop = nextTop;
+    state.animating = true;
+    requestAnimationFrame(() => {
+      track.style.transition = `transform ${CFG.animMs}ms cubic-bezier(.22,.61,.36,1)`;
+      track.style.transform = `translateY(${-offset}px)`;
+    });
+    setTimeout(() => { if (state.animating && state.pendingTop === nextTop) finishAnimation(); }, CFG.animMs + 60);
+  } else {
+    const prevTop = state.top - 1;
+    const prevH = measureHeight(state.units[prevTop].text, L.contentW, L.fontSize, L.lineH, state.units[prevTop].heading);
+    const shift = prevH + L.gap;
+    renderView(state.top, "up", L);
+    track.style.transition = "none";
+    track.style.transform = `translateY(${-shift}px)`;
+    state.pendingTop = prevTop;
+    state.animating = true;
+    requestAnimationFrame(() => {
+      track.style.transition = `transform ${CFG.animMs}ms cubic-bezier(.22,.61,.36,1)`;
+      track.style.transform = "translateY(0px)";
+    });
+    setTimeout(() => { if (state.animating && state.pendingTop === prevTop) finishAnimation(); }, CFG.animMs + 60);
+  }
+}
+
+/* ============================================================================
+ * HUD / 状态
+ * ==========================================================================*/
+const hud = {
+  n: document.getElementById("hud-n"),
+  range: document.getElementById("hud-range"),
+  font: document.getElementById("hud-font"),
+  gap: document.getElementById("hud-gap"),
+  fit: document.getElementById("hud-fit"),
+  flags: document.getElementById("hud-flags"),
+};
+const progressBar = document.querySelector("#progress > i");
+
+function updateHud(L) {
+  const last = Math.min(L.top + L.n, state.units.length);
+  hud.n.textContent = L.n;
+  hud.range.textContent = `${L.top + 1}–${last} / ${state.units.length}`;
+  hud.font.textContent = `${L.fontSize}px / ${state.lineHeightEm.toFixed(2)}em`;
+  hud.gap.textContent = `${L.gap.toFixed(1)}px (${(L.gap / L.fontSize).toFixed(2)}em)`;
+  hud.fit.textContent = `${Math.round(L.usedHeight)} / ${Math.round(L.avail)}px`;
+  const flags = [];
+  if (L.shrunk) flags.push("已缩字号");
+  if (L.soloOverflow) flags.push("超长句独占一屏（可内部滚动）");
+  hud.flags.textContent = flags.join(" · ");
+  progressBar.style.width = (state.units.length ? (last / state.units.length) * 100 : 0) + "%";
+}
+
+const statusEl = document.getElementById("status");
+let statusTimer = 0;
+function setStatus(msg, sticky) {
+  statusEl.textContent = msg;
+  statusEl.classList.add("on");
+  clearTimeout(statusTimer);
+  if (!sticky) statusTimer = setTimeout(() => statusEl.classList.remove("on"), 2600);
+}
+
+/* ============================================================================
+ * 交互
+ * ==========================================================================*/
+let wheelAcc = 0;
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  let d = e.deltaY;
+  if (e.deltaMode === 1) d *= 40;                       // 行模式
+  else if (e.deltaMode === 2) d *= stage.clientHeight;  // 页模式
+
+  // 整格事件（鼠标滚轮常见 100/120px）：算出整数步并清零累加器。
+  // 若把 120 的余数留着，滚 5 格会多走一步——一格必须严格等于一段。
+  if (Math.abs(d) >= CFG.wheelStepPx) {
+    wheelAcc = 0;
+    const count = Math.min(Math.round(Math.abs(d) / CFG.wheelStepPx), CFG.wheelMaxSteps);
+    step(Math.sign(d), Math.max(count, 1));
+    return;
+  }
+  // 小增量（触控板/平滑滚动）：累加到一档才走一步。
+  // 不做空闲清零：慢速小增量若被定时清掉就永远攒不满一档，滚不动
+  wheelAcc += d;
+  if (Math.abs(wheelAcc) >= CFG.wheelStepPx) {
+    const dir = Math.sign(wheelAcc);
+    wheelAcc -= dir * CFG.wheelStepPx;
+    wheelAcc = Math.max(-CFG.wheelStepPx, Math.min(CFG.wheelStepPx, wheelAcc));
+    step(dir, 1);
+  }
+}, { passive: false });
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === "j") { step(1, 1); e.preventDefault(); }
+  else if (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "k") { step(-1, 1); e.preventDefault(); }
+  else if (e.key === "Home") { renderView(0, "none"); e.preventDefault(); }
+});
+
+let resizeTimer = 0;
+new ResizeObserver(() => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (!state.units.length) return;
+    const L = computeLayout(state.top);
+    const top = Math.min(state.top, Math.max(state.units.length - L.n, 0));
+    renderView(top, "none");
+  }, 100);
+}).observe(stage);
+
+/* ---- 工具栏 ---- */
+const fontSlider = document.getElementById("s-font");
+const lhSlider = document.getElementById("s-lh");
+const gapSlider = document.getElementById("s-gap");
+
+fontSlider.addEventListener("input", () => {
+  state.baseFont = +fontSlider.value;
+  document.getElementById("v-font").textContent = state.baseFont + " px";
+  renderView(state.top, "none");
+});
+lhSlider.addEventListener("input", () => {
+  state.lineHeightEm = +lhSlider.value;
+  document.getElementById("v-lh").textContent = state.lineHeightEm.toFixed(2) + " em";
+  renderView(state.top, "none");
+});
+gapSlider.addEventListener("input", () => {
+  state.targetGapEm = +gapSlider.value;
+  document.getElementById("v-gap").textContent = state.targetGapEm.toFixed(2) + " em";
+  renderView(state.top, "none");
+});
+document.getElementById("btn-bare").addEventListener("click", () => {
+  document.body.classList.toggle("bare");   // 隐藏上下控件条，阅读区占满窗口（ResizeObserver 会重排）
+  setTimeout(() => setStatus(document.body.classList.contains("bare") ? "全屏阅读：再按一次恢复控件条" : "控件条已恢复"), 80);
+});
+document.getElementById("btn-reset").addEventListener("click", () => {
+  loadText(document.getElementById("seed").textContent, "内置示例：测试文件.txt");
+});
+
+/* ---- 文件载入：txt 离线；pdf/docx 首次点开时懒加载 CDN 解析库 ---- */
+const fileInput = document.getElementById("file-input");
+document.getElementById("btn-open").addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  if (fileInput.files && fileInput.files[0]) loadFile(fileInput.files[0]);
+  fileInput.value = "";
+});
+
+const dropHint = document.getElementById("drop-hint");
+["dragenter", "dragover"].forEach(t => window.addEventListener(t, (e) => {
+  e.preventDefault(); dropHint.classList.add("on");
+}));
+["dragleave", "drop"].forEach(t => window.addEventListener(t, (e) => {
+  e.preventDefault();
+  if (t === "dragleave" && e.relatedTarget) return;
+  dropHint.classList.remove("on");
+}));
+window.addEventListener("drop", (e) => {
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) loadFile(f);
+});
+
+function decodeText(buf) {
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(buf); }
+  catch (err) {
+    try { return new TextDecoder("gbk").decode(buf); }
+    catch (err2) { return new TextDecoder("utf-8").decode(buf); }
+  }
+}
+
+function loadScript(url, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    const timer = setTimeout(() => { s.remove(); reject(new Error("超时")); }, timeoutMs);
+    s.src = url;
+    s.onload = () => { clearTimeout(timer); resolve(url); };
+    s.onerror = () => { clearTimeout(timer); reject(new Error("加载失败")); };
+    document.head.appendChild(s);
+  });
+}
+
+// 解析库放在多个镜像上逐个试：单 CDN 被墙/超时不影响整体
+const CDN = {
+  pdfjs: [
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js",
+    "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js",
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js",
+  ],
+  mammoth: [
+    "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js",
+    "https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js",
+    "https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js",
+  ],
+};
+
+async function loadFirst(urls, what) {
+  for (const url of urls) {
+    try { return await loadScript(url); }
+    catch (err) { setStatus(`${what} 解析库：${url.split("/")[2]} ${err.message}，换下一个镜像…`, true); }
+  }
+  throw new Error(`${what} 解析库全部镜像均不可用（需联网；离线可先把文档另存为 .txt）`);
+}
+
+async function loadFile(file) {
+  const name = file.name || "未命名";
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  setStatus(`正在解析 ${name} …`, true);
+  try {
+    const buf = await file.arrayBuffer();
+    if (ext === "txt") {
+      loadText(decodeText(buf), name);
+    } else if (ext === "pdf") {
+      const lib = await loadFirst(CDN.pdfjs, "pdf.js");
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = lib.replace("pdf.min.js", "pdf.worker.min.js");
+      const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+      const paras = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const tc = await page.getTextContent();
+        let line = null;
+        const lines = [];
+        for (const item of tc.items) {
+          const y = item.transform[5];
+          if (!line || Math.abs(y - line.y) > 2) { line = { y, text: item.str }; lines.push(line); }
+          else line.text += item.str;
+        }
+        paras.push(lines.map(l => l.text).join(" "));   // 原型简化：一页一段，段内再切句
+      }
+      loadText(paras.join("\n\n"), name);
+    } else if (ext === "docx" || ext === "doc") {
+      await loadFirst(CDN.mammoth, "mammoth");
+      const res = await window.mammoth.extractRawText({ arrayBuffer: buf });
+      loadText(res.value, name);
+    } else {
+      setStatus(`不支持的类型：.${ext}（仅 .txt / .pdf / .docx）`);
+      return;
+    }
+    setStatus(`已载入 ${name} · 共 ${state.units.length} 句 · 滚轮单段步进`);
+  } catch (err) {
+    setStatus(`${name} 解析失败：${err.message || err}`);
+  }
+}
+
+function loadText(text, name) {
+  state.units = makeUnits(text);
+  state.top = 0;
+  measureCache.clear();
+  renderView(0, "none");
+  setStatus(`已载入 ${name} · 共 ${state.units.length} 句 · 滚轮单段步进`);
+}
+
+/* ---- 供自动化验证读取的调试接口 ---- */
+window.__step_reader = {
+  stats() {
+    const L = state.lastLayout;
+    const last = Math.min(L.top + L.n, state.units.length);
+    const firstUnits = [];
+    for (let i = L.top; i < last; i++) firstUnits.push({ index: i, text: state.units[i].text.slice(0, 40), h: Math.round(L.heights[i - L.top]) });
+    return {
+      N: L.n, top: L.top, firstVisible: L.top + 1, lastVisible: last, total: state.units.length,
+      fontSize: L.fontSize, lineHeightEm: state.lineHeightEm, lineHeightPx: L.lineH,
+      gapPx: +L.gap.toFixed(2), gapEm: +(L.gap / L.fontSize).toFixed(2),
+      padTop: +L.padTop.toFixed(2), avail: Math.round(L.avail), usedHeight: +L.usedHeight.toFixed(2),
+      fits: L.usedHeight <= L.avail + 0.5, shrunk: L.shrunk, soloOverflow: L.soloOverflow,
+      stage: { w: stage.clientWidth, h: stage.clientHeight },
+      units: firstUnits,
+    };
+  },
+  // 视口几何断言：每段 DOM 底边都必须落在视口内（防半截）
+  domCheck() {
+    const rect = stage.getBoundingClientRect();
+    const items = [...track.querySelectorAll(".unit")].map(el => {
+      const r = el.getBoundingClientRect();
+      return { index: +el.dataset.index, top: +r.top.toFixed(1), bottom: +r.bottom.toFixed(1), h: +r.height.toFixed(1) };
+    });
+    return { stageRect: { top: rect.top, bottom: rect.bottom, h: rect.height }, items };
+  },
+  step(delta, count) { step(delta, count || 1); },
+  jump(top) { renderView(Math.max(0, Math.min(top, state.units.length - 1)), "none"); },  // 同步跳转（无动画）
+  layout(top) { return computeLayout(top === undefined ? state.top : top); },
+  loadText, loadFile, decodeText,
+};
+
+/* ---- 启动：先渲染内置示例 ---- */
+loadText(document.getElementById("seed").textContent, "内置示例：测试文件.txt");
+</script>
+</body>
+</html>

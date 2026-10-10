@@ -76,6 +76,14 @@ class TextMapper:
         sy = dy - vp.scroll_offset[1] + vp.window_origin[1]
         return (sx, sy)
 
+    @staticmethod
+    def _effective_tol(block: TextBlock, tol: float) -> float:
+        """块自己的容差上限优先：逐句模式下由版面按"到相邻块的半个空隙"算出，
+        保证相邻命中域不相交（容差可以开到最大而不互相侵占）。"""
+        if block.hit_pad_max is None:
+            return tol
+        return min(tol, block.hit_pad_max)
+
     #命中测试,鼠标点击后，拿文档坐标，在文本块列表里查命中
     def hit_test(
         self,
@@ -89,14 +97,14 @@ class TextMapper:
         #    多候选时取"离凝视点最近"的块，而不是列表里最后一个：重排版面的段间距
         #    只有 0.5 行高，容差 100px 会让上下相邻几段的命中域全部重叠，
         #    按逆序取第一个会稳定选中下方 1~3 段。并列时取靠上的段。
-        candidates = [b for b in self._blocks if b.contains(dx, dy, tol)]
+        candidates = [b for b in self._blocks if b.contains(dx, dy, self._effective_tol(b, tol))]
         if candidates:
             return min(candidates, key=lambda b: (b.distance_to(dx, dy), b.y, b.x))
 
-        # 2. 回退"最近块"：距离最小且 ≤ tolerance 才承认命中
+        # 2. 回退"最近块"：距离最小且 ≤ 该块自己的容差才承认命中
         if tol > 0 and self._blocks:
             nearest = min(self._blocks, key=lambda b: b.distance_to(dx, dy))
-            if nearest.distance_to(dx, dy) <= tol:
+            if nearest.distance_to(dx, dy) <= self._effective_tol(nearest, tol):
                 return nearest
         return None
 

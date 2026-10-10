@@ -27,12 +27,13 @@ class FeedbackView(QWidget):
         try:
             if self._region is None:
                 return
-            #设置画笔样式
-            pen = QPen(QColor(0, 180, 255), 2) 
+            #柔和靛蓝 + 圆角 + 半透明填充：亮青蓝的方角框在暖白纸面上太扎眼
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor(37, 99, 235, 205), 3)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
-            color = QColor(0, 180, 255, 40)
-            painter.setBrush(color)
+            painter.setBrush(QColor(37, 99, 235, 26))
             r = self._region
-            painter.drawRect(r.x, r.y, r.w, r.h) #绘制矩形
+            painter.drawRoundedRect(r.x, r.y, r.w, r.h, 12, 12) #绘制圆角矩形
         finally:
             painter.end()

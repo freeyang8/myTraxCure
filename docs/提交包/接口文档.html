@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>myTraxCure 模块接口文档</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="logo">mT</div>
+  <h1>myTraxCure 模块接口文档</h1>
+  <span class="sub">眼动驱动翻译桌面软件 · PyQt6 + eyetrax</span>
+  <span class="spacer"></span>
+  <span class="meta">v0.1.0 · 2026-10-09 · 5151 行源码</span>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="search-wrap">
+      <input id="search" class="search" type="search" placeholder="搜索类 / 方法 / 字段…" autocomplete="off">
+      <div class="search-hint" id="searchHint">支持类名、方法名、字段名、中文说明</div>
+    </div>
+    <nav class="nav" id="toc"></nav>
+  </aside>
+
+  <main class="content" id="content">
+
+    <!-- ======================= 总览 ======================= -->
+    <section class="mod" id="overview" data-title="项目概览" data-group="总览" data-kind="overview">
+      <h2>项目概览 <span class="badge">Overview</span></h2>
+      <p class="purpose">基于 eyetrax 的眼动驱动翻译桌面软件：用视线凝视选中外文段落，按空格即时弹出译文浮层。输入不可靠时自动降级为鼠标模式。</p>
+      <p class="path">mytraxcure/ · 入口 main.py → mytraxcure.app:run()</p>
+
+      <div class="stats" id="stats"></div>
+
+      <h3 class="api-h">技术栈与外部依赖 <span class="kind">runtime</span></h3>
+      <table class="api">
+        <thead><tr><th>依赖</th><th>用途</th><th>引入位置</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">PyQt6</td><td>窗口 / 事件循环 / 绘图（QWidget、QThread、QPainter）</td><td>ui/*、core/gaze/camera.py</td></tr>
+          <tr><td class="fld">eyetrax 0.4.0</td><td>人脸特征提取与凝视回归（GazeEstimator、KalmanEMASmoother、校准）</td><td>core/gaze/*</td></tr>
+          <tr><td class="fld">mediapipe / numpy</td><td>底层人脸关键点与数值计算</td><td>core/gaze/gaze_wrapper.py</td></tr>
+          <tr><td class="fld">PyMuPDF (fitz)</td><td>PDF 文本层解析</td><td>core/file/file_parser.py</td></tr>
+          <tr><td class="fld">python-docx</td><td>Word 段落解析</td><td>core/file/file_parser.py</td></tr>
+          <tr><td class="fld">Ollama (HTTP)</td><td>本地大模型翻译，默认 hy-mt1.5-1.8b-fixed @ 127.0.0.1:11434</td><td>core/translation/ollama_engine.py</td></tr>
+          <tr><td class="fld">sqlite3</td><td>翻译缓存（data/cache.db，WAL 模式）</td><td>core/translation/cache_store.py</td></tr>
+          <tr><td class="fld">screeninfo / win32gui</td><td>主屏物理分辨率、窗口遮挡检测</td><td>core/gaze/screen_utils.py、text_mapper.py</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">分层结构 <span class="kind">architecture</span></h3>
+      <div class="stack">
+        <div class="layer ui">
+          <div class="lname">界面层 ui/ · PyQt6 视图</div>
+          <div class="chips">
+            <span class="chip">MainWindow</span><span class="chip">ViewerView</span>
+            <span class="chip">OverlayView</span><span class="chip">FeedbackView</span>
+            <span class="chip">GazeCursorView</span><span class="chip">GazeSettingsDialog</span>
+            <span class="chip">SettingsView</span>
+          </div>
+        </div>
+        <div class="layer core">
+          <div class="lname">核心层 core/ · 无 Qt 依赖或轻 Qt</div>
+          <div class="chips">
+            <span class="chip">file</span><span class="chip">gaze</span><span class="chip">gaze_logic</span>
+            <span class="chip">translation</span><span class="chip">fallback</span>
+            <span class="chip">config</span><span class="chip">types</span>
+          </div>
+        </div>
+        <div class="layer ext">
+          <div class="lname">外部依赖 · 硬件与模型</div>
+          <div class="chips">
+            <span class="chip">摄像头 (cv2)</span><span class="chip">eyetrax 模型</span>
+            <span class="chip">Ollama 服务</span><span class="chip">sqlite 文件</span>
+            <span class="chip">校准 pkl</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="note">
+        <b>模块职责一句话：</b>file 负责“把文档变成带坐标的文本块”，gaze 负责“把摄像头帧变成屏幕坐标”，gaze_logic 负责“判定是否凝视选中并算出选区”，translation 负责“选中文本 → 译文（带缓存）”，fallback 负责“眼动不可用时降级鼠标”，ui 负责“装配与呈现”。
+      </div>
+    </section>
+
+    <!-- ======================= 启动链路 ======================= -->
+    <section class="mod" id="chain-boot" data-title="调用链路：启动" data-group="总览" data-kind="chain">
+      <h2>调用链路：启动 <span class="badge g-purple">Call Chain</span></h2>
+      <p class="purpose">从进程入口到眼动模式就绪。校准在 Qt 事件循环创建之前完成（cv2 全屏窗口需要独占）。</p>
+      <p class="path">main.py → mytraxcure/__main__.py → app.run()</p>
+
+      <div class="chain">
+        <div class="cstep"><span class="sig">main.py</span><span class="note">脚本入口，调用 mytraxcure.app.run()</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">app.run() → ConfigManager.load()</span><span class="note">读 config.local.json（纯文件 IO，无需 Qt）；缺失/损坏则回退默认配置</span></div>
+        <div class="cdown"></div>
+        <div class="cstep gate"><span class="sig">ensure_calibration(config) → CalibrationOutcome</span><span class="note">三态决策：沿用已有 pkl / 本次新校准 / 无校准降级</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">QApplication(...) → MainWindow(config, config_manager)</span><span class="note">创建 Qt 应用与主窗口，装配 viewer / feedback / overlay / 摄像头预览面板</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">MainWindow.start_default_mode(tune_noise)</span><span class="note">启动即进眼动；本次刚校准则先做噪声微调</span></div>
+        <div class="cdown"></div>
+        <div class="cstep async"><span class="sig">MainWindow._enable_gaze_mode()</span><span class="note">内部流程见下</span></div>
+        <div class="cbranch">
+          FallbackManager.try_enable_gaze() → GazeWrapper &nbsp;|&nbsp; 成功则进入眼动<br>
+          CalibrationStore.load(wrapper, env) &nbsp;|&nbsp; 加载校准模型<br>
+          CameraThread(camera_index).start() &nbsp;|&nbsp; 启动摄像头采集线程<br>
+          frame_ready 信号 → _on_gaze_frame / _on_camera_frame
+        </div>
+      </div>
+      <div class="note warn"><b>关键点：</b><code>ensure_calibration()</code> 必须在 <code>QApplication</code> 之前调用 —— eyetrax 校准用 cv2 全屏窗口，与 Qt 事件循环争抢会失效。</div>
+    </section>
+
+    <!-- ======================= 眼动主链路 ======================= -->
+    <section class="mod" id="chain-gaze" data-title="调用链路：眼动主链路" data-group="总览" data-kind="chain">
+      <h2>调用链路：眼动主链路 <span class="badge g-purple">Call Chain</span></h2>
+      <p class="purpose">从摄像头帧到蓝框锁定，是整个系统的核心数据流。</p>
+      <p class="path">CameraThread.frame_ready → MainWindow.on_gaze_point()</p>
+
+      <div class="chain">
+        <div class="cstep async"><span class="sig">CameraThread.frame_ready(frame)</span><span class="note">子线程发帧（BGR ndarray），主线程槽接收</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">MainWindow._on_gaze_frame(frame)</span><span class="note">主链路调度入口</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">GazeWrapper.extract(frame) → GazeSample</span><span class="note">提特征 + 眨眼标志 + 头部姿态(yaw/pitch/roll)</span></div>
+        <div class="cdown"></div>
+        <div class="cstep gate"><span class="sig">门控：blink / head_angle_allowed()</span><span class="note">丢脸、眨眼、转头(&gt;15°) 帧直接丢弃并隐藏红点、reset 检测窗</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">GazeWrapper.predict(sample) → GazePoint</span><span class="note">回归模型输出物理像素坐标</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">SmootherAdapter.step(x, y)</span><span class="note">卡尔曼 + EMA 二次平滑</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">MainWindow._eyetrax_to_qt(x, y)</span><span class="note">物理像素 → Qt 逻辑像素（除以 devicePixelRatio）</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">GazeCursorView.set_gaze_point(x, y)</span><span class="note">绘制红色凝视点（独立顶层窗口）</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">MainWindow.on_gaze_point(point)</span><span class="note">与鼠标模式共用同一入口</span></div>
+        <div class="cdown"></div>
+        <div class="cstep gate"><span class="sig">TextMapper.is_occluded(point)</span><span class="note">窗口失焦/最小化/被遮挡 → 暂停采样</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">TextMapper.hit_test(point, tolerance_px)</span><span class="note">带容差命中，多候选取离凝视点最近者；未命中再走“最近块回退”</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">TextMapper.paragraph_union_bbox(block)</span><span class="note">聚合同 para_key 的所有块 → 并集 bbox（文档坐标）</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">TextMapper.document_to_screen()</span><span class="note">文档坐标 → 屏幕全局坐标</span></div>
+        <div class="cdown"></div>
+        <div class="cstep gate"><span class="sig">GazeDetector.update(point, block_key, block_height_px)</span><span class="note">驻留 0.6s + 众数占比 + 质心偏移 → GazeStability(stable, mode)</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">RegionLocker.lock_block() / lock()</span><span class="note">段落模式取并集框（超限回退）；否则 400×120 点框</span></div>
+        <div class="cdown"></div>
+        <div class="cstep io"><span class="sig">FeedbackView.show_region(region)</span><span class="note">绘制蓝框；随后 detector.reset() 保证 0.6s 只触发一次</span></div>
+      </div>
+    </section>
+
+    <!-- ======================= 翻译链路 ======================= -->
+    <section class="mod" id="chain-translate" data-title="调用链路：翻译与预翻译" data-group="总览" data-kind="chain">
+      <h2>调用链路：翻译与预翻译 <span class="badge g-purple">Call Chain</span></h2>
+      <p class="purpose">即时翻译（按空格触发）与后台预翻译共用同一份 <code>translate_text</code> 与同一个缓存键构造函数。</p>
+      <p class="path">MainWindow.on_space() / _start_pre_translation()</p>
+
+      <h3 class="api-h">即时翻译（用户按空格）</h3>
+      <div class="chain">
+        <div class="cstep"><span class="sig">Keyboard Space → MainWindow.on_space()</span><span class="note">浮层已显示则关闭；否则取 _locked_region</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">MainWindow._trigger_translation(region)</span><span class="note">本地坐标 → 全局坐标</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">TextMapper.segment_key_parts() / region_key_parts()</span><span class="note">段落模式取段落文本；点模式回退区域内块拼接</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">make_segment_key(parts, cfg, backend) → CacheKey</span><span class="note">与预翻译共用，保证键一致</span></div>
+        <div class="cdown"></div>
+        <div class="cstep gate"><span class="sig">CacheStore.get(key)</span><span class="note">命中 → 直接 OverlayView.show_translation()</span></div>
+        <div class="cdown"></div>
+        <div class="cstep async"><span class="sig">TranslationWorker.request(text)</span><span class="note">QThread；期间暂停预翻译</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">translate_text() → OllamaEngine.translate()</span><span class="note">按 max_chars_per_segment 切段，逐段请求 /api/generate（流式）</span></div>
+        <div class="cdown"></div>
+        <div class="cstep io"><span class="sig">finished → _on_translation_done(result)</span><span class="note">显示浮层 + 写缓存 CacheStore.put() + 恢复预翻译</span></div>
+      </div>
+
+      <h3 class="api-h">后台预翻译（加载文档后）</h3>
+      <div class="chain">
+        <div class="cstep"><span class="sig">MainWindow.load_file(path)</span><span class="note">FileParser.parse → segment_blocks → ViewerView.load_document</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">MainWindow._start_pre_translation()</span><span class="note">取 mapper.segments() 前 N 段（默认 30）</span></div>
+        <div class="cdown"></div>
+        <div class="cstep async"><span class="sig">PreTranslator.start() → run()</span><span class="note">QThread，自带一条 sqlite 连接</span></div>
+        <div class="cdown"></div>
+        <div class="cstep gate"><span class="sig">make_segment_key() → CacheStore.get()</span><span class="note">已缓存则跳过，直接报进度</span></div>
+        <div class="cdown"></div>
+        <div class="cstep"><span class="sig">translate_text() → CacheStore.put()</span><span class="note">写缓存；用户按空格时即命中</span></div>
+      </div>
+      <div class="note"><b>为什么两条路径要共用 <code>make_segment_key</code>：</b>任何一处字段不一致，预翻译写进去的结果就永远命不中，整个预翻译等于白做。</div>
+    </section>
+
+    <!-- ======================= 入口层 ======================= -->
+    <section class="mod" id="app" data-title="app.py · run()" data-group="入口层" data-kind="module">
+      <h2><code>mytraxcure/app.py</code> <span class="badge g-amber">入口</span></h2>
+      <p class="purpose">应用装配入口：加载配置 → 启动前校准 → 创建 QApplication 与主窗口 → 进入事件循环。</p>
+      <p class="path">mytraxcure/app.py · mytraxcure/__main__.py</p>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">run()</code></td><td class="ret">int</td><td>完整启动流程，返回 <code>app.exec()</code> 的退出码。核心顺序见“启动链路”。</td></tr>
+          <tr><td><code class="sig">_center_on_screen(window)</code></td><td class="ret">None</td><td>把窗口移到当前屏幕可用区域中心（默认左上角，阅读偏头累）。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= core/config ======================= -->
+    <section class="mod" id="config" data-title="core/config.py · 配置" data-group="核心层 core" data-kind="module">
+      <h2><code>core/config.py</code> <span class="badge g-green">配置</span></h2>
+      <p class="purpose">全部可调参数的数据类定义与 JSON 持久化。配置文件为项目根目录 <code>config.local.json</code>，缺失/损坏时回退默认值。</p>
+      <p class="path">mytraxcure/core/config.py</p>
+
+      <h3 class="api-h">路径常量 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>常量</th><th>值</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">PROJECT_ROOT</td><td>项目根目录（config.py 上溯 2 级）</td></tr>
+          <tr><td class="fld">DATA_DIR</td><td>&lt;root&gt;/data</td></tr>
+          <tr><td class="fld">CALIBRATION_DIR</td><td>data/calibration（校准 pkl 存放处）</td></tr>
+          <tr><td class="fld">UPLOADS_DIR</td><td>data/uploads</td></tr>
+          <tr><td class="fld">CACHE_DB_PATH</td><td>data/cache.db（翻译缓存 sqlite）</td></tr>
+          <tr><td class="fld">CONFIG_PATH</td><td>&lt;root&gt;/config.local.json</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">GazeConfig <span class="kind">@dataclass</span></h3>
+      <p class="desc">眼动采集、凝视判定、命中容差与头部姿态门控参数。</p>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">model_name</td><td>str</td><td class="dft">"auto"</td><td>auto=校准后按交叉验证误差自动选；也可指定 ridge/elastic_net/tiny_mlp 等</td></tr>
+          <tr><td class="fld">camera_index</td><td>int</td><td class="dft">0</td><td>摄像头设备序号</td></tr>
+          <tr><td class="fld">ema_alpha</td><td>float</td><td class="dft">0.25</td><td>EMA 强度：out = a·prev + (1-a)·new，越大越平滑越滞后</td></tr>
+          <tr><td class="fld">face_landmarker_model</td><td>str | None</td><td class="dft">None</td><td>None → eyetrax 自动下载/读环境变量</td></tr>
+          <tr><td class="fld">dwell_seconds</td><td>float</td><td class="dft">0.6</td><td>凝视驻留判定时长（秒）</td></tr>
+          <tr><td class="fld">paragraph_mode</td><td>bool</td><td class="dft">True</td><td>True=段落模式；无块/超大块时自动回退点模式</td></tr>
+          <tr><td class="fld">dominant_ratio</td><td>float</td><td class="dft">0.5</td><td>窗口内 para_key 众数占比下限</td></tr>
+          <tr><td class="fld">min_dominant_frames</td><td>int</td><td class="dft">3</td><td>换段磁滞：切到新段所需连续命中帧数</td></tr>
+          <tr><td class="fld">hit_tolerance_px</td><td>float</td><td class="dft">100.0</td><td>连续滚动模式首选命中容差（px）</td></tr>
+          <tr><td class="fld">tolerance_ratio_of_block_h</td><td>float</td><td class="dft">0.7</td><td>“最近块回退”容差 = 块高 × 该比例</td></tr>
+          <tr><td class="fld">step_hit_tolerance_px</td><td>float</td><td class="dft">200.0</td><td>逐句模式请求容差（实际被块 hit_pad_max 夹住）</td></tr>
+          <tr><td class="fld">max_variance_px</td><td>float</td><td class="dft">60.0</td><td>点模式：窗口方差上限</td></tr>
+          <tr><td class="fld">max_offset_px</td><td>float</td><td class="dft">40.0</td><td>点模式：单点离质心最大距离</td></tr>
+          <tr><td class="fld">max_head_angle_deg</td><td>float</td><td class="dft">15.0</td><td>yaw/pitch 超此角度则暂停选区（roll 不判）</td></tr>
+        </tbody>
+      </table>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">runtime_model_name()</code></td><td class="ret">str</td><td>构造 GazeEstimator 时的具体模型名；auto → 占位 ridge，非法名统一兜底。</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">RegionConfig <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">default_width</td><td>int</td><td class="dft">400</td><td>点模式蓝框默认宽</td></tr>
+          <tr><td class="fld">default_height</td><td>int</td><td class="dft">120</td><td>点模式蓝框默认高</td></tr>
+          <tr><td class="fld">max_width</td><td>int</td><td class="dft">1000</td><td>段落并集 bbox 宽度上限；超限判为“整页一大块”回退点模式</td></tr>
+          <tr><td class="fld">max_height</td><td>int</td><td class="dft">400</td><td>段落并集 bbox 高度上限</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">TranslationConfig <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">backend</td><td>str</td><td class="dft">"ollama"</td><td>翻译后端（当前仅 ollama）</td></tr>
+          <tr><td class="fld">model</td><td>str</td><td class="dft">"hy-mt1.5-1.8b-fixed:latest"</td><td>Ollama 模型名</td></tr>
+          <tr><td class="fld">ollama_url</td><td>str</td><td class="dft">"http://127.0.0.1:11434"</td><td>Ollama 服务地址</td></tr>
+          <tr><td class="fld">source_lang / target_lang</td><td>str</td><td class="dft">"auto" / "zh"</td><td>源/目标语言</td></tr>
+          <tr><td class="fld">timeout_s</td><td>float</td><td class="dft">60.0</td><td>单次请求超时</td></tr>
+          <tr><td class="fld">max_retries</td><td>int</td><td class="dft">2</td><td>超时重试次数</td></tr>
+          <tr><td class="fld">retry_interval_s</td><td>float</td><td class="dft">1.0</td><td>重试间隔</td></tr>
+          <tr><td class="fld">max_chars_per_segment</td><td>int</td><td class="dft">800</td><td>超长文本自动分段阈值</td></tr>
+          <tr><td class="fld">term_table_path</td><td>str | None</td><td class="dft">None</td><td>CSV 术语表路径（原文,译文）</td></tr>
+          <tr><td class="fld">pre_translate</td><td>bool</td><td class="dft">True</td><td>加载文档后是否后台预翻译</td></tr>
+          <tr><td class="fld">pre_translate_max_segments</td><td>int</td><td class="dft">30</td><td>单次最多预翻译段数</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">ReadingConfig <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">step_mode</td><td>bool</td><td class="dft">True</td><td>True=逐句步进（启动默认）；False=连续滚动</td></tr>
+          <tr><td class="fld">font_px</td><td>int</td><td class="dft">44</td><td>逐句模式字号（像素）</td></tr>
+          <tr><td class="fld">line_height_em</td><td>float</td><td class="dft">2.5</td><td>行高（倍字号）</td></tr>
+          <tr><td class="fld">gap_em</td><td>float</td><td class="dft">2.9</td><td>段间距目标值（倍字号）</td></tr>
+          <tr><td class="fld">max_gap_em</td><td>float</td><td class="dft">6.0</td><td>段间距上限</td></tr>
+          <tr><td class="fld">min_font_px</td><td>int</td><td class="dft">16</td><td>超长句缩字号保留下限</td></tr>
+          <tr><td class="fld">margin_x_min</td><td>int</td><td class="dft">40</td><td>左右边距下限（px）</td></tr>
+          <tr><td class="fld">margin_x_vw</td><td>float</td><td class="dft">0.06</td><td>左右边距（视口宽占比）</td></tr>
+          <tr><td class="fld">margin_y</td><td>int</td><td class="dft">24</td><td>上下边距（px）</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">CalibrationConfig <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">mode</td><td>str</td><td class="dft">"14_point"</td><td>5_point / 9_point / 14_point / dense / lissajous / adaptive</td></tr>
+          <tr><td class="fld">sample_seconds_per_point</td><td>float</td><td class="dft">1.5</td><td>每点采集时长（网格模式）</td></tr>
+          <tr><td class="fld">min_frames_per_point</td><td>int</td><td class="dft">30</td><td>每点样本数下限（只告警不失败）</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">AppConfig <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">gaze</td><td>GazeConfig</td><td>眼动配置段</td></tr>
+          <tr><td class="fld">region</td><td>RegionConfig</td><td>选区配置段</td></tr>
+          <tr><td class="fld">translation</td><td>TranslationConfig</td><td>翻译配置段</td></tr>
+          <tr><td class="fld">calibration</td><td>CalibrationConfig</td><td>校准配置段</td></tr>
+          <tr><td class="fld">reading</td><td>ReadingConfig</td><td>阅读模式配置段</td></tr>
+          <tr><td class="fld">user_id</td><td>str</td><td>用户标识（默认 "default"，参与校准文件名）</td></tr>
+        </tbody>
+      </table>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">to_dict()</code></td><td class="ret">dict[str, Any]</td><td>递归转 dict（asdict）</td></tr>
+          <tr><td><code class="sig">from_dict(data)</code> <span class="kind">classmethod</span></td><td class="ret">AppConfig</td><td>逐段用默认值兜底合并，旧配置缺字段也能加载</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">ConfigManager <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(path=None)</code></td><td class="ret">—</td><td>默认使用 CONFIG_PATH</td></tr>
+          <tr><td><code class="sig">last_source</code> <span class="kind">attr</span></td><td class="ret">str</td><td>"file"=读到自定义配置 / "default"=默认值（缺失或损坏回退）</td></tr>
+          <tr><td><code class="sig">load()</code></td><td class="ret">AppConfig</td><td>读取并解析；JSON 损坏时打印原因并回退默认</td></tr>
+          <tr><td><code class="sig">save(config)</code></td><td class="ret">None</td><td>写回 config.local.json（ensure_ascii=False, indent=2）</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= core/types ======================= -->
+    <section class="mod" id="types" data-title="core/types.py · 数据模型" data-group="核心层 core" data-kind="module">
+      <h2><code>core/types.py</code> <span class="badge g-green">数据模型</span></h2>
+      <p class="purpose">全项目共享的基础数据结构：凝视点、头部姿态、文本块、选区矩形、段落聚合。</p>
+      <p class="path">mytraxcure/core/types.py</p>
+
+      <h3 class="api-h">GazePoint <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">x</td><td>float</td><td class="dft">—</td><td>屏幕逻辑坐标 x</td></tr>
+          <tr><td class="fld">y</td><td>float</td><td class="dft">—</td><td>屏幕逻辑坐标 y</td></tr>
+          <tr><td class="fld">timestamp</td><td>float</td><td class="dft">time.time()</td><td>采集时间戳，驻留判定依赖</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">HeadPose <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>成员</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">yaw / pitch / roll</td><td>float</td><td>头部三轴角度（弧度）</td></tr>
+          <tr><td><code class="sig">max_abs_deg()</code></td><td class="ret">float</td><td>只取 yaw/pitch 的绝对值最大者转角度；roll 不参与（正脸≈±π 会环绕跳变）</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">GazeSample <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">features</td><td>np.ndarray</td><td>eyetrax 提取的特征向量（末三位为 yaw/pitch/roll）</td></tr>
+          <tr><td class="fld">blink</td><td>bool</td><td>是否眨眼</td></tr>
+          <tr><td class="fld">head_pose</td><td>HeadPose</td><td>头部姿态</td></tr>
+          <tr><td class="fld">timestamp</td><td>float</td><td>时间戳</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">Region <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>成员</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">x / y / w / h</td><td>int</td><td>矩形位置与尺寸</td></tr>
+          <tr><td><code class="sig">right</code> / <code class="sig">bottom</code></td><td class="ret">int</td><td>属性：x+w / y+h</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">TextBlock <span class="kind">@dataclass</span></h3>
+      <p class="desc">命中与翻译的最小单位。重排渲染后回填真实 bbox。</p>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">text</td><td>str</td><td class="dft">—</td><td>文本内容</td></tr>
+          <tr><td class="fld">page</td><td>int</td><td class="dft">—</td><td>页号（重排后恒为 0）</td></tr>
+          <tr><td class="fld">x / y / w / h</td><td>float</td><td class="dft">—</td><td>文档坐标 bbox</td></tr>
+          <tr><td class="fld">block_id</td><td>str</td><td class="dft">""</td><td>原始结构位置编码（如 p0-b1-l2-s0）</td></tr>
+          <tr><td class="fld">source</td><td>str</td><td class="dft">""</td><td>PDF / TXT / WORD / STEP / notice</td></tr>
+          <tr><td class="fld">para_key</td><td>str</td><td class="dft">""</td><td>段落聚合键；空则回退 block_id</td></tr>
+          <tr><td class="fld">hit_pad_max</td><td>float | None</td><td class="dft">None</td><td>该块容差上限（文档坐标）；逐句模式=到相邻句空隙的一半</td></tr>
+        </tbody>
+      </table>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">contains(dx, dy, tol=0.0)</code></td><td class="ret">bool</td><td>命中判定唯一出处：bbox 外膨胀 tol 后是否包含点</td></tr>
+          <tr><td><code class="sig">distance_to(dx, dy)</code></td><td class="ret">float</td><td>点到矩形的最短距离（用于最近块回退）</td></tr>
+          <tr><td><code class="sig">right</code> / <code class="sig">bottom</code></td><td class="ret">float</td><td>属性：x+w / y+h</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">ParagraphGroup <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段 / 属性</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">para_key</td><td>str</td><td>段落键</td></tr>
+          <tr><td class="fld">page</td><td>int</td><td>页号</td></tr>
+          <tr><td class="fld">bbox</td><td>Region</td><td>段内所有块并集 bbox（文档坐标）</td></tr>
+          <tr><td class="fld">block_ids</td><td>list[str]</td><td>成员块 id</td></tr>
+          <tr><td><code class="sig">width</code> / <code class="sig">height</code></td><td class="ret">int</td><td>属性：bbox 宽 / 高</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">point_rect_distance(px, py, x, y, w, h)</code></td><td class="ret">float</td><td>点到轴对齐矩形的最短欧氏距离</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= core/file ======================= -->
+    <section class="mod" id="file-parser" data-title="core/file/file_parser.py · 解析" data-group="核心层 core" data-kind="module">
+      <h2><code>core/file/file_parser.py</code> <span class="badge g-green">文档解析</span></h2>
+      <p class="purpose">按扩展名路由到 PDF / TXT / Word 解析器，产出统一的 ParsedDocument（含 TextBlock 列表）。不做 OCR，不支持图片/扫描件。</p>
+      <p class="path">mytraxcure/core/file/file_parser.py</p>
+
+      <h3 class="api-h">ParsedDocument <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">path</td><td>Path</td><td class="dft">—</td><td>文件路径</td></tr>
+          <tr><td class="fld">kind</td><td>str</td><td class="dft">—</td><td>PDF / TXT / WORD</td></tr>
+          <tr><td class="fld">pages</td><td>list[Any]</td><td class="dft">[]</td><td>每页尺寸 (w, h)</td></tr>
+          <tr><td class="fld">blocks</td><td>list[TextBlock]</td><td class="dft">[]</td><td>文本块列表</td></tr>
+          <tr><td class="fld">meta</td><td>dict</td><td class="dft">{}</td><td>元数据：page_count / needs_ocr_pages / layout_pending / encoding 等</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">FileParser <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">SUPPORTED</code> <span class="kind">ClassVar[set]</span></td><td class="ret">set[str]</td><td>{".pdf", ".txt", ".doc", ".docx"}</td></tr>
+          <tr><td><code class="sig">parse(path)</code></td><td class="ret">ParsedDocument</td><td>校验后缀并路由；不支持的类型抛 ValueError</td></tr>
+          <tr><td><code class="sig">_parse_pdf(path)</code></td><td class="ret">ParsedDocument</td><td>PyMuPDF 逐 span 建块，block_id=p{页}-b{块}-l{行}-s{片}，para_key=p{页}-b{块}；无文本层页记入 needs_ocr_pages</td></tr>
+          <tr><td><code class="sig">_parse_txt(path)</code></td><td class="ret">ParsedDocument</td><td>依次尝试 utf-8-sig/utf-8/gbk；空行分段，坐标待渲染回填</td></tr>
+          <tr><td><code class="sig">_parse_word(path)</code></td><td class="ret">ParsedDocument</td><td>python-docx 逐段落建块，para_key=para{n}</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="segmenter" data-title="core/file/segmenter.py · 切分" data-group="核心层 core" data-kind="module">
+      <h2><code>core/file/segmenter.py</code> <span class="badge g-green">语义切分</span></h2>
+      <p class="purpose">文档内容的语义切分与阅读顺序归一化：排序、PDF 段落几何二次切分、重编 para_key 为连续的 seg{n}、生成段落文本。</p>
+      <p class="path">mytraxcure/core/file/segmenter.py</p>
+
+      <h3 class="api-h">常量 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>常量</th><th>值</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">NOTICE_SOURCE</td><td>"notice"</td><td>扫描页占位提示块来源标记：只渲染不翻译</td></tr>
+          <tr><td class="fld">REFLOW_PAGE</td><td>0</td><td>重排后整篇同属这一逻辑页</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">segment_blocks(blocks)</code></td><td class="ret">list[TextBlock]</td><td>按阅读顺序排序 → 切分段落 → 重编 para_key=seg{n}，page 统一为 REFLOW_PAGE</td></tr>
+          <tr><td><code class="sig">group_paragraphs(blocks)</code></td><td class="ret">list[tuple[str, list[TextBlock]]]</td><td>把已排序的块归成段落，返回 (para_key, 段内 blocks)</td></tr>
+          <tr><td><code class="sig">line_id(b, index)</code></td><td class="ret">str</td><td>块在原始版式里的“视觉行”标识（同行的多个 span 归同一 id）</td></tr>
+          <tr><td><code class="sig">paragraph_text_with_spans(blocks)</code></td><td class="ret">(str, list[(TextBlock,int,int)])</td><td>段落文本 + 每个块在文本中的字符区间（渲染回填 bbox 用）</td></tr>
+          <tr><td><code class="sig">paragraph_text(blocks)</code></td><td class="ret">str</td><td>段落文本的唯一出处（预翻译与即时翻译共用）</td></tr>
+          <tr><td><code class="sig">make_ocr_notices(needs_ocr_pages)</code></td><td class="ret">list[TextBlock]</td><td>为扫描页生成占位提示块（避免静默丢内容）</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="sentence-splitter" data-title="core/file/sentence_splitter.py · 分句" data-group="核心层 core" data-kind="module">
+      <h2><code>core/file/sentence_splitter.py</code> <span class="badge g-green">分句</span></h2>
+      <p class="purpose">把文档切成“一句一段”的显示单位（逐句步进模式用）。先按段落分，再在段内按句末标点切，含英文缩写/小数等反例保护。</p>
+      <p class="path">mytraxcure/core/file/sentence_splitter.py</p>
+
+      <h3 class="api-h">Sentence <span class="kind">@dataclass(frozen=True)</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">text</td><td>str</td><td>句子文本</td></tr>
+          <tr><td class="fld">start / end</td><td>int</td><td>在段落文本中的字符区间（供回填坐标）</td></tr>
+          <tr><td class="fld">para_index</td><td>int</td><td>所属段落序号</td></tr>
+          <tr><td class="fld">heading</td><td>bool</td><td>是否标题段（默认 False）</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">split_sentences(paragraph, para_index=0, heading=False)</code></td><td class="ret">list[Sentence]</td><td>段内切句；终止符保留在句尾</td></tr>
+          <tr><td><code class="sig">split_document(text)</code></td><td class="ret">list[Sentence]</td><td>整篇切句：空行分段，段内单换行合并</td></tr>
+          <tr><td><code class="sig">split_paragraphs(text)</code></td><td class="ret">list[str]</td><td>空行分段；`#` 开头行独立成段；段内软换行拼成一行</td></tr>
+          <tr><td><code class="sig">is_heading(paragraph)</code></td><td class="ret">bool</td><td>是否以 `#` 开头的标题段</td></tr>
+          <tr><td><code class="sig">is_separator(line)</code></td><td class="ret">bool</td><td>`---` / `***` 类纯分隔符行</td></tr>
+          <tr><td><code class="sig">strip_heading(paragraph)</code></td><td class="ret">str</td><td>去掉标题井号</td></tr>
+        </tbody>
+      </table>
+      <div class="note">切分规则来自原型 <code>tools/step_reader_prototype.html</code>：中文 <code>。！？…</code> 恒断；英文 <code>.</code> 需过小数(3.14)、缩写(Mr./U.S./e.g.)、单字母缩写(J. R. R.) 反例保护。</div>
+    </section>
+
+    <section class="mod" id="text-mapper" data-title="core/file/text_mapper.py · 坐标映射" data-group="核心层 core" data-kind="module">
+      <h2><code>core/file/text_mapper.py</code> <span class="badge g-green">坐标映射</span></h2>
+      <p class="purpose">屏幕坐标 ↔ 文档坐标互转、命中测试、段落聚合（并集 bbox）、遮挡检测。是凝视点落到文本块的“翻译官”。</p>
+      <p class="path">mytraxcure/core/file/text_mapper.py</p>
+
+      <h3 class="api-h">ViewportState <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">window_origin</td><td>tuple[int,int]</td><td class="dft">(0,0)</td><td>窗口左上在屏幕逻辑坐标中的位置</td></tr>
+          <tr><td class="fld">scroll_offset</td><td>tuple[int,int]</td><td class="dft">(0,0)</td><td>视口滚动偏移（逻辑像素）</td></tr>
+          <tr><td class="fld">current_page</td><td>int</td><td class="dft">0</td><td>当前可见页</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">TextMapper <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">set_target_window(hwnd=None, provider=None)</code></td><td class="ret">None</td><td>设置遮挡检测的目标窗口句柄 / 自定义提供者</td></tr>
+          <tr><td><code class="sig">register_blocks(blocks)</code></td><td class="ret">None</td><td>接收文本块并清空段落聚合缓存</td></tr>
+          <tr><td><code class="sig">clear()</code></td><td class="ret">None</td><td>清空块与缓存</td></tr>
+          <tr><td><code class="sig">update_viewport(window_origin=None, scroll_offset=None, current_page=None)</code></td><td class="ret">None</td><td>更新视口；翻页时自动清聚合缓存</td></tr>
+          <tr><td><code class="sig">screen_to_document(screen_point)</code></td><td class="ret">tuple[float,float]</td><td>屏幕坐标 → 文档坐标</td></tr>
+          <tr><td><code class="sig">document_to_screen(doc_point)</code></td><td class="ret">tuple[float,float]</td><td>文档坐标 → 屏幕坐标（反向链路）</td></tr>
+          <tr><td><code class="sig">hit_test(screen_point, tolerance_px=0.0)</code></td><td class="ret">TextBlock | None</td><td>带容差命中；多候选取离凝视点最近者（并列取靠上）；未命中走最近块回退</td></tr>
+          <tr><td><code class="sig">paragraph_blocks(para_key)</code></td><td class="ret">list[TextBlock]</td><td>取该段所有块</td></tr>
+          <tr><td><code class="sig">segment_text(para_key)</code></td><td class="ret">str</td><td>段落文本（翻译唯一出处）</td></tr>
+          <tr><td><code class="sig">segment_key_parts(para_key)</code></td><td class="ret">tuple | None</td><td>→ (para_key, 文本, page, 首块 id)，供建缓存键</td></tr>
+          <tr><td><code class="sig">region_key_parts(region)</code></td><td class="ret">tuple | None</td><td>点模式回退：区域内 blocks 按阅读顺序拼文本</td></tr>
+          <tr><td><code class="sig">segments()</code></td><td class="ret">list[tuple]</td><td>按阅读顺序返回各段，预翻译据此排队</td></tr>
+          <tr><td><code class="sig">paragraph_key(block)</code> <span class="kind">staticmethod</span></td><td class="ret">str</td><td>从 block 推导段落键（优先 para_key，否则按来源解析 block_id）</td></tr>
+          <tr><td><code class="sig">paragraph_union_bbox(block)</code></td><td class="ret">ParagraphGroup | None</td><td>聚合同段所有块 → 并集 bbox（带缓存）</td></tr>
+          <tr><td><code class="sig">blocks_in_region(region)</code></td><td class="ret">list[TextBlock]</td><td>区域内块（AABB 相交，按 (y,x) 排序）</td></tr>
+          <tr><td><code class="sig">is_occluded(screen_point)</code></td><td class="ret">bool</td><td>最小化/失焦/点不在窗口/点级遮挡检测（win32gui）</td></tr>
+        </tbody>
+      </table>
+      <div class="note warn"><b>已知行为：</b>容差区重叠时，<code>hit_test</code> 取“离凝视点最近”的块（而非列表最后一个），并列时取靠上的段——这是为修复重排版面下“稳定选中下方 1~3 段”的问题。</div>
+    </section>
+
+    <section class="mod" id="file-viewer" data-title="core/file/file_viewer.py · 渲染" data-group="核心层 core" data-kind="module">
+      <h2><code>core/file/file_viewer.py</code> <span class="badge g-green">版面渲染</span></h2>
+      <p class="purpose">两种阅读模式的版面渲染器：DocumentRenderer（整篇连续纵向版面 + 像素滚动）与 StepRenderer（逐句步进，每屏独立排版、无全局滚动）。</p>
+      <p class="path">mytraxcure/core/file/file_viewer.py</p>
+
+      <h3 class="api-h">版面常量 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>常量</th><th>值</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">_LINE_HEIGHT / _MARGIN / _FONT_SIZE</td><td>34 / 40 / 20</td><td>连续滚动模式行高 / 左右边距 / 字号</td></tr>
+          <tr><td class="fld">_WRAP_WIDTH / _PARA_GAP / _MIN_HEIGHT</td><td>960 / 17 / 400</td><td>内容最大宽度 / 段间距(0.5 行高) / 版面最小高度</td></tr>
+          <tr><td class="fld">STEP_SOURCE</td><td>"STEP"</td><td>逐句模式合成块来源标记</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">DocumentRenderer <span class="kind">class</span></h3>
+      <p class="desc">全类型统一重排渲染：按段落纵向排布，只渲染可视区域（避免 Qt 位图 32767px 上限）。</p>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(document)</code></td><td class="ret">—</td><td>持有 ParsedDocument</td></tr>
+          <tr><td><code class="sig">set_mapper(mapper)</code></td><td class="ret">None</td><td>注入 TextMapper：回填 bbox 后重新注册块</td></tr>
+          <tr><td><code class="sig">content_size()</code></td><td class="ret">tuple[int,int]</td><td>整篇版面尺寸（用于滚动范围）</td></tr>
+          <tr><td><code class="sig">render_viewport(x_offset, y_offset, width, height)</code></td><td class="ret">np.ndarray</td><td>渲染文档坐标 (x,y) 起、w×h 大的可视区（RGB 数组）</td></tr>
+          <tr><td><code class="sig">invalidate_cache()</code></td><td class="ret">None</td><td>清版面缓存</td></tr>
+          <tr><td><code class="sig">_wrap_ranges(fm, text, max_w)</code> <span class="kind">staticmethod</span></td><td class="ret">list[tuple[int,int]]</td><td>按宽度折行，返回每行字符区间（二分求长串切点）</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">StepRenderer <span class="kind">class</span></h3>
+      <p class="desc">逐句步进版面：句高/字号/段间距按当前视口算，映射器看到的永远是屏内坐标（scroll_offset 恒 0）。</p>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(document, reading)</code></td><td class="ret">—</td><td>reading 为 ReadingConfig</td></tr>
+          <tr><td><code class="sig">set_mapper(mapper)</code></td><td class="ret">None</td><td>注入映射器</td></tr>
+          <tr><td><code class="sig">units</code> <span class="kind">property</span></td><td class="ret">list[StepUnit]</td><td>句子单位列表（懒构建）</td></tr>
+          <tr><td><code class="sig">screen</code> <span class="kind">property</span></td><td class="ret">StepScreen | None</td><td>当前屏排版结果</td></tr>
+          <tr><td><code class="sig">content_size()</code></td><td class="ret">tuple[int,int]</td><td>返回视口尺寸本身（滚轮位移夹成 0）</td></tr>
+          <tr><td><code class="sig">ensure_screen(width, height)</code></td><td class="ret">StepScreen</td><td>视口/首句变化才重算；随后同步块坐标</td></tr>
+          <tr><td><code class="sig">render_viewport(x, y, w, h)</code></td><td class="ret">np.ndarray</td><td>画当前一屏（偏移恒 0）</td></tr>
+          <tr><td><code class="sig">step(delta)</code></td><td class="ret">bool</td><td>下/上一句；到顶/底或超长句独占时返回 False</td></tr>
+          <tr><td><code class="sig">solo_scroll(dy)</code></td><td class="ret">bool</td><td>超长句独占一屏时的内部滚动，到边界返回 False</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">StepUnit / StepScreen <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>类 / 字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">StepUnit.index / text / heading / block</td><td>int/str/bool/TextBlock</td><td>一句 = 一个显示单位；block 是合成块（para_key=sentence-{i}）</td></tr>
+          <tr><td class="fld">StepScreen.top / n / gap / pad_top</td><td>int/int/float/float</td><td>首句序号 / 本屏句数 / 段间距 / 顶部留白</td></tr>
+          <tr><td class="fld">StepScreen.font_px / line_h / content_w / margin_x / avail</td><td>int…</td><td>本屏字号 / 行高 / 内容宽 / 边距 / 可用高</td></tr>
+          <tr><td class="fld">StepScreen.heights / lines</td><td>list</td><td>每句高度 / 每句折行文本</td></tr>
+          <tr><td class="fld">StepScreen.solo / shrunk</td><td>bool</td><td>是否超长句独占一屏 / 是否缩过字号</td></tr>
+          <tr><td><code class="sig">used_height</code> <span class="kind">property</span></td><td class="ret">float</td><td>已用高度 = Σ句高 + gap×(n-1)</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= core/gaze ======================= -->
+    <section class="mod" id="camera" data-title="core/gaze/camera.py · 采集线程" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze/camera.py</code> <span class="badge g-green">摄像头</span></h2>
+      <p class="purpose">独立 QThread 循环读取摄像头帧，通过信号把帧、FPS、错误发回主线程。</p>
+      <p class="path">mytraxcure/core/gaze/camera.py</p>
+
+      <h3 class="api-h">CameraThread(QThread) <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">frame_ready</td><td>pyqtSignal(object)</td><td>每帧 BGR ndarray</td></tr>
+          <tr><td class="fld">fps_updated</td><td>pyqtSignal(float)</td><td>实时 FPS</td></tr>
+          <tr><td class="fld">error_occurred</td><td>pyqtSignal(str)</td><td>打开摄像头失败等错误信息</td></tr>
+        </tbody>
+      </table>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(camera_index=0, parent=None)</code></td><td class="ret">—</td><td>—</td></tr>
+          <tr><td><code class="sig">run()</code></td><td class="ret">None</td><td>线程体：open_camera → 循环 read → emit frame_ready</td></tr>
+          <tr><td><code class="sig">stop()</code></td><td class="ret">None</td><td>置停止标志，循环退出后释放摄像头</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="gaze-wrapper" data-title="core/gaze/gaze_wrapper.py · 估计器" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze/gaze_wrapper.py</code> <span class="badge g-green">凝视估计</span></h2>
+      <p class="purpose">对 eyetrax GazeEstimator 的薄封装：特征提取、凝视预测、模型训练与持久化。</p>
+      <p class="path">mytraxcure/core/gaze/gaze_wrapper.py</p>
+
+      <h3 class="api-h">GazeWrapper <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(model_name="ridge", model_kwargs=None, face_landmarker_model=None, **estimator_kwargs)</code></td><td class="ret">—</td><td>构造底层 GazeEstimator</td></tr>
+          <tr><td><code class="sig">extract(frame)</code></td><td class="ret">GazeSample | None</td><td>提特征 + 眨眼 + 头姿；无特征返回 None</td></tr>
+          <tr><td><code class="sig">predict(sample)</code></td><td class="ret">GazePoint</td><td>回归输出屏幕物理像素坐标</td></tr>
+          <tr><td><code class="sig">train(X, y, variable_scaling=None)</code></td><td class="ret">None</td><td>训练回归模型</td></tr>
+          <tr><td><code class="sig">save_model(path)</code> / <code class="sig">load_model(path)</code></td><td class="ret">None</td><td>持久化 / 加载校准模型（pkl）</td></tr>
+          <tr><td><code class="sig">estimator</code> <span class="kind">property</span></td><td class="ret">GazeEstimator</td><td>访问底层估计器</td></tr>
+          <tr><td><code class="sig">close()</code></td><td class="ret">None</td><td>释放资源</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="smoother" data-title="core/gaze/smoother_adapter.py · 平滑" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze/smoother_adapter.py</code> <span class="badge g-green">滤波平滑</span></h2>
+      <p class="purpose">凝视点平滑（固定 kalman_ema）+ 5 点噪声微调（自建实现，覆盖 eyetrax 的 3 点版）。</p>
+      <p class="path">mytraxcure/core/gaze/smoother_adapter.py</p>
+
+      <h3 class="api-h">函数 / 常量 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>名称</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">NOISE_TUNE_POINTS</td><td>int</td><td>噪声微调点数（5）</td></tr>
+          <tr><td><code class="sig">tune_noise(gaze_estimator, camera_index=0)</code></td><td class="ret">np.ndarray | None</td><td>5 点收集同点抖动 → 测量噪声协方差；ESC 取消/样本不足返回 None</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">SmootherAdapter <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(ema_alpha=0.25)</code></td><td class="ret">—</td><td>构建 KalmanEMASmoother</td></tr>
+          <tr><td><code class="sig">step(x, y)</code></td><td class="ret">tuple[float,float]</td><td>平滑一步</td></tr>
+          <tr><td><code class="sig">set_ema_alpha(alpha)</code></td><td class="ret">None</td><td>运行时改平滑强度，不重建滤波器</td></tr>
+          <tr><td><code class="sig">reset()</code></td><td class="ret">None</td><td>重建滤波器并恢复已 tuning 的噪声协方差</td></tr>
+          <tr><td><code class="sig">tune(gaze_estimator, camera_index=0)</code></td><td class="ret">bool</td><td>5 点噪声微调；False=取消/样本不足</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="calibration-store" data-title="core/gaze/calibration_store.py · 校准存取" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze/calibration_store.py</code> <span class="badge g-green">校准存储</span></h2>
+      <p class="purpose">校准模型的命名、保存、加载。文件名 = {user_id}_{camera_id}_{W}x{H}.pkl，按环境隔离。</p>
+      <p class="path">mytraxcure/core/gaze/calibration_store.py</p>
+
+      <h3 class="api-h">CalibrationEnvironment <span class="kind">@dataclass(frozen=True)</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">screen_resolution</td><td>tuple[int,int]</td><td>屏幕分辨率 (W, H)</td></tr>
+          <tr><td class="fld">camera_id</td><td>int</td><td>摄像头序号</td></tr>
+          <tr><td class="fld">user_id</td><td>str</td><td>用户标识</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">CalibrationStore <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(directory=None)</code></td><td class="ret">—</td><td>默认 CALIBRATION_DIR</td></tr>
+          <tr><td><code class="sig">path_for(env)</code></td><td class="ret">Path</td><td>按环境拼出 pkl 路径</td></tr>
+          <tr><td><code class="sig">save(wrapper, env)</code></td><td class="ret">Path</td><td>保存模型</td></tr>
+          <tr><td><code class="sig">load(wrapper, env)</code></td><td class="ret">bool</td><td>加载模型；文件不存在返回 False</td></tr>
+          <tr><td><code class="sig">exists(env)</code></td><td class="ret">bool</td><td>该校准是否存在</td></tr>
+          <tr><td><code class="sig">environment_changed(env)</code></td><td class="ret">bool</td><td>环境变化（即不存在）</td></tr>
+          <tr><td><code class="sig">list_environments()</code></td><td class="ret">list[Path]</td><td>列出所有 pkl</td></tr>
+          <tr><td><code class="sig">clear()</code></td><td class="ret">None</td><td>删除所有 pkl</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="calibration-runner" data-title="core/gaze/calibration_runner.py · 校准" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze/calibration_runner.py</code> <span class="badge g-green">校准与模型优选</span></h2>
+      <p class="purpose">自采集网格点特征/目标，同一份数据跑按注视点分组的 K 折交叉验证，挑误差最小的模型再全量训练。</p>
+      <p class="path">mytraxcure/core/gaze/calibration_runner.py</p>
+
+      <h3 class="api-h">常量 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>常量</th><th>值</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">AUTO_MODEL_CANDIDATES</td><td>("ridge", "elastic_net", "tiny_mlp")</td></tr>
+          <tr><td class="fld">GRID_MODES</td><td>("5_point", "9_point", "14_point", "dense")</td></tr>
+          <tr><td class="fld">DELEGATED_MODES</td><td>("lissajous", "adaptive")</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">数据容器 <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>类 / 字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">SampleSet.X / y / groups / n_points / frames_per_point</td><td>ndarray/int/list</td><td>特征、目标、每样本注视点编号、点数、每点帧数</td></tr>
+          <tr><td class="fld">ModelScore.name / error_px / note</td><td>str/float|None/str</td><td>模型名 / 交叉验证误差(px) / 备注</td></tr>
+          <tr><td class="fld">CalibrationReport.mode / model_name / cv_error_px / n_samples / n_points / scores / notes</td><td>混合</td><td>校准报告；<code>summary()</code> 输出一行摘要</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">describe_mode(mode)</code></td><td class="ret">str</td><td>模式名 → 中文标签</td></tr>
+          <tr><td><code class="sig">normalize_mode(mode)</code></td><td class="ret">str</td><td>未知模式回退 14_point</td></tr>
+          <tr><td><code class="sig">capture_grid_samples(estimator, cap, points, sw, sh, sample_seconds, max_head_angle_deg)</code></td><td class="ret">tuple | None</td><td>网格点采集（脉冲提示 + 采集），多一条头部姿态入库条件；ESC 返回 None</td></tr>
+          <tr><td><code class="sig">collect_grid_samples(estimator, points, sample_seconds, camera_index, max_head_angle_deg)</code></td><td class="ret">SampleSet | None</td><td>采集一次网格样本，按目标坐标把样本分回注视点</td></tr>
+          <tr><td><code class="sig">cross_validate(X, y, groups, names, folds=5)</code></td><td class="ret">list[ModelScore]</td><td>按注视点分组 K 折交叉验证，返回各模型平均像素误差</td></tr>
+          <tr><td><code class="sig">run_calibration(estimator, calibration, gaze, camera_index)</code></td><td class="ret">CalibrationReport | None</td><td>对外入口：网格模式做模型优选；lissajous/adaptive 交给 eyetrax；None=取消</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="startup-calibration" data-title="core/gaze/startup_calibration.py · 启动校准" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze/startup_calibration.py</code> <span class="badge g-green">启动校准决策</span></h2>
+      <p class="purpose">Qt 事件循环创建前的校准三态决策：沿用已有 pkl / 本次新校准 / 无校准降级。</p>
+      <p class="path">mytraxcure/core/gaze/startup_calibration.py</p>
+
+      <h3 class="api-h">CalibrationOutcome <span class="kind">Enum</span></h3>
+      <table class="api">
+        <thead><tr><th>成员</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">LOADED_EXISTING</td><td>沿用已有 .pkl</td></tr>
+          <tr><td class="fld">NEWLY_CALIBRATED</td><td>本次新校准并已保存</td></tr>
+          <tr><td class="fld">FALLBACK</td><td>无可用校准 → 鼠标降级</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">run_and_save(store, env, camera_index, calibration=None, gaze=None)</code></td><td class="ret">CalibrationReport | None</td><td>跑一次校准并保存 pkl；None=用户取消/未训练出模型</td></tr>
+          <tr><td><code class="sig">ensure_calibration(config=None)</code></td><td class="ret">CalibrationOutcome</td><td>三态决策主入口；有旧档先问是否重校准（MessageBox）</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="screen-utils" data-title="core/gaze/screen_utils.py · 屏幕尺寸" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze/screen_utils.py</code> <span class="badge g-green">屏幕工具</span></h2>
+      <p class="purpose">取 Windows 主屏物理分辨率（与 cv2 全屏窗口、Qt 主屏一致），避免多屏错位。</p>
+      <p class="path">mytraxcure/core/gaze/screen_utils.py</p>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">primary_screen_size()</code></td><td class="ret">tuple[int,int]</td><td>带 is_primary 标记的显示器分辨率；找不到退回列表首项</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= core/gaze_logic ======================= -->
+    <section class="mod" id="gaze-detector" data-title="core/gaze_logic/gaze_detector.py · 驻留判定" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze_logic/gaze_detector.py</code> <span class="badge g-green">驻留判定</span></h2>
+      <p class="purpose">滑动窗口内判定“是否稳定凝视”，分段落模式与点模式两条路。</p>
+      <p class="path">mytraxcure/core/gaze_logic/gaze_detector.py</p>
+
+      <h3 class="api-h">GazeStability <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">stable</td><td>bool</td><td>是否稳定驻留</td></tr>
+          <tr><td class="fld">mode</td><td>str</td><td>"paragraph" / "point"，上层据此选 RegionLocker 路径</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">GazeDetector <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(dwell_seconds=0.8, max_variance_px=60.0, max_offset_px=40.0, dominant_ratio=0.6, min_dominant_frames=4, window_size=60)</code></td><td class="ret">—</td><td>默认值会被 MainWindow 用配置覆盖</td></tr>
+          <tr><td><code class="sig">reset()</code></td><td class="ret">None</td><td>清窗口与主导段状态（锁定后调用，保证单次触发）</td></tr>
+          <tr><td><code class="sig">update(point, block_key=None, block_height_px=0.0)</code></td><td class="ret">GazeStability</td><td>唯一入口：追加窗口 → 按时间裁剪 → 按 block_key 分派段落/点模式</td></tr>
+          <tr><td><code class="sig">head_angle_allowed(max_abs_deg, head_pose)</code></td><td class="ret">bool</td><td>头部角度是否允许采样</td></tr>
+        </tbody>
+      </table>
+      <div class="note"><b>段落模式判定：</b>dwell≥0.6s 且 dominant 众数占比≥0.5 且质心 offset≤max(40, 段高)；带换段磁滞（新 key 需连续命中 3 帧）。<b>点模式：</b>方差≤60 且 offset≤40 且窗口跨度≥0.6s。</div>
+    </section>
+
+    <section class="mod" id="region-locker" data-title="core/gaze_logic/region_locker.py · 选区锁定" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze_logic/region_locker.py</code> <span class="badge g-green">选区锁定</span></h2>
+      <p class="purpose">把凝视点/段落并集框转成最终蓝框矩形，含尺寸上限校验与边界夹取。</p>
+      <p class="path">mytraxcure/core/gaze_logic/region_locker.py</p>
+
+      <h3 class="api-h">RegionLocker <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(config)</code></td><td class="ret">—</td><td>config 为 RegionConfig</td></tr>
+          <tr><td><code class="sig">lock(point, bounds=None)</code></td><td class="ret">Region</td><td>点模式：以凝视点为中心取默认尺寸（400×120），夹在 bounds 内</td></tr>
+          <tr><td><code class="sig">lock_block(screen_region, bounds=None, max_size=None)</code></td><td class="ret">Region | None</td><td>段落模式：超上限返回 None（上层回退点模式）；max_size 按阅读模式覆盖上限</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="keyboard-handler" data-title="core/gaze_logic/keyboard_handler.py · 快捷键" data-group="核心层 core" data-kind="module">
+      <h2><code>core/gaze_logic/keyboard_handler.py</code> <span class="badge g-green">快捷键</span></h2>
+      <p class="purpose">空格 / ESC 快捷键封装为信号（当前主窗口自行处理按键，本类为可选组件）。</p>
+      <p class="path">mytraxcure/core/gaze_logic/keyboard_handler.py</p>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>类型 / 返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">space_pressed / esc_pressed</td><td>pyqtSignal()</td><td>空格 / ESC 按下信号</td></tr>
+          <tr><td><code class="sig">__init__(parent)</code></td><td class="ret">—</td><td>在 parent 上安装 QShortcut</td></tr>
+          <tr><td><code class="sig">set_enabled(enabled)</code></td><td class="ret">None</td><td>启用/禁用两个快捷键</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= core/translation ======================= -->
+    <section class="mod" id="translation-engine" data-title="core/translation/translation_engine.py · 引擎抽象" data-group="核心层 core" data-kind="module">
+      <h2><code>core/translation/translation_engine.py</code> <span class="badge g-green">翻译抽象</span></h2>
+      <p class="purpose">翻译结果/上下文数据结构、引擎抽象基类、超长文本切段。</p>
+      <p class="path">mytraxcure/core/translation/translation_engine.py</p>
+
+      <h3 class="api-h">TranslationResult <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">text / source</td><td>str</td><td class="dft">—</td><td>译文 / 原文</td></tr>
+          <tr><td class="fld">backend / model</td><td>str</td><td class="dft">—</td><td>后端名 / 模型名</td></tr>
+          <tr><td class="fld">elapsed_ms</td><td>int</td><td class="dft">—</td><td>耗时（毫秒）</td></tr>
+          <tr><td class="fld">cached</td><td>bool</td><td class="dft">—</td><td>是否缓存命中</td></tr>
+          <tr><td class="fld">error</td><td>str | None</td><td class="dft">None</td><td>错误信息</td></tr>
+          <tr><td class="fld">ttft_ms</td><td>float | None</td><td class="dft">None</td><td>首 token 耗时</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">TranslationContext <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">previous_paragraph / next_paragraph</td><td>str | None</td><td>前后段（仅作上下文，不翻译）</td></tr>
+          <tr><td class="fld">terms</td><td>dict[str,str] | None</td><td>术语表：原文→译文</td></tr>
+          <tr><td class="fld">page / block_id</td><td>int/str | None</td><td>定位信息</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">TranslationEngine(ABC) <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">name</td><td>str</td><td>后端名（基类 "base"）</td></tr>
+          <tr><td><code class="sig">translate(text, source_lang, target_lang, context=None)</code></td><td class="ret">TranslationResult</td><td>抽象方法；实现需处理超时/重试/取消</td></tr>
+          <tr><td><code class="sig">health_check()</code></td><td class="ret">bool</td><td>后端可用性检查（基类恒 True）</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">split_segments(text, max_chars=800)</code></td><td class="ret">list[str]</td><td>按句子/空行切段，超长再硬切</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="engine-factory" data-title="core/translation/engine_factory.py · 工厂" data-group="核心层 core" data-kind="module">
+      <h2><code>core/translation/engine_factory.py</code> <span class="badge g-green">引擎工厂</span></h2>
+      <p class="purpose">按配置的后端名惰性构造翻译引擎。</p>
+      <p class="path">mytraxcure/core/translation/engine_factory.py</p>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">create_engine(config=None)</code></td><td class="ret">TranslationEngine</td><td>按 config.backend 查表并导入对应类；未知后端抛 ValueError</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="ollama-engine" data-title="core/translation/ollama_engine.py · Ollama" data-group="核心层 core" data-kind="module">
+      <h2><code>core/translation/ollama_engine.py</code> <span class="badge g-green">Ollama 后端</span></h2>
+      <p class="purpose">调用 Ollama /api/generate 流式接口翻译，组装术语表与上下文提示词，带超时重试。</p>
+      <p class="path">mytraxcure/core/translation/ollama_engine.py</p>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(config)</code></td><td class="ret">—</td><td>持有 TranslationConfig</td></tr>
+          <tr><td><code class="sig">_build_prompt(text, src, tgt, context)</code></td><td class="ret">str</td><td>拼提示词：术语表 + 上下文 + 原文</td></tr>
+          <tr><td><code class="sig">translate(text, source_lang, target_lang, context=None)</code></td><td class="ret">TranslationResult</td><td>流式请求，记录 ttft；失败重试 max_retries 次，最终失败填 error</td></tr>
+          <tr><td><code class="sig">health_check()</code></td><td class="ret">bool</td><td>请求 /api/tags 检查目标模型是否已下载</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="cache-store" data-title="core/translation/cache_store.py · 缓存" data-group="核心层 core" data-kind="module">
+      <h2><code>core/translation/cache_store.py</code> <span class="badge g-green">翻译缓存</span></h2>
+      <p class="purpose">sqlite 翻译缓存。键 = 文本+语言+后端+模型+页码+块 id 的 sha256 指纹；预翻译与即时翻译共用同一构造函数。</p>
+      <p class="path">mytraxcure/core/translation/cache_store.py</p>
+
+      <h3 class="api-h">CacheKey <span class="kind">@dataclass</span></h3>
+      <table class="api">
+        <thead><tr><th>字段</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">source_text / source_lang / target_lang</td><td>str</td><td class="dft">—</td><td>原文与语言</td></tr>
+          <tr><td class="fld">backend / model</td><td>str</td><td class="dft">—</td><td>后端与模型</td></tr>
+          <tr><td class="fld">prompt_version / term_version</td><td>str</td><td class="dft">"v1" / ""</td><td>提示词/术语表版本</td></tr>
+          <tr><td class="fld">page / block_id</td><td>int/str | None</td><td class="dft">None</td><td>定位信息</td></tr>
+          <tr><td><code class="sig">fingerprint()</code></td><td class="ret">str</td><td class="dft">—</td><td>所有字段规范化后 sha256</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">函数 / 类 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>名称</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">normalize_text(text)</code></td><td class="ret">str</td><td>去首尾空白 + 多空白合一</td></tr>
+          <tr><td><code class="sig">make_segment_key(segment, cfg, backend)</code></td><td class="ret">CacheKey</td><td>段落 (para_key, 文本, page, 首块 id) → 缓存键（唯一构造函数）</td></tr>
+          <tr><td><code class="sig">CacheStore.__init__(db_path=None)</code></td><td class="ret">—</td><td>默认 CACHE_DB_PATH</td></tr>
+          <tr><td><code class="sig">CacheStore.get(key)</code></td><td class="ret">TranslationResult | None</td><td>命中返回（cached=True），否则 None</td></tr>
+          <tr><td><code class="sig">CacheStore.put(key, result, file_hash)</code></td><td class="ret">None</td><td>写入（INSERT OR REPLACE）；result.error 非空则跳过</td></tr>
+          <tr><td><code class="sig">CacheStore.clear_all()</code> / <code class="sig">close()</code></td><td class="ret">None</td><td>清空表 / 关闭连接</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="translation-worker" data-title="core/translation/translation_worker.py · 工作线程" data-group="核心层 core" data-kind="module">
+      <h2><code>core/translation/translation_worker.py</code> <span class="badge g-green">翻译线程</span></h2>
+      <p class="purpose">即时翻译的工作线程；<code>translate_text</code> 为即时翻译与预翻译共用的切段翻译实现。</p>
+      <p class="path">mytraxcure/core/translation/translation_worker.py</p>
+
+      <h3 class="api-h">函数 <span class="kind">module-level</span></h3>
+      <table class="api">
+        <thead><tr><th>签名</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">translate_text(engine, cfg, text, context=None, is_canceled=None)</code></td><td class="ret">TranslationResult | None</td><td>按 max_chars_per_segment 切段依次翻译并拼接；None=中途取消</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">TranslationWorker(QThread) <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>类型 / 返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">finished / failed</td><td>pyqtSignal(object) / (str)</td><td>成功结果 / 失败消息</td></tr>
+          <tr><td><code class="sig">__init__(engine, config, parent=None)</code></td><td class="ret">—</td><td>—</td></tr>
+          <tr><td><code class="sig">request(text, context=None)</code></td><td class="ret">None</td><td>提交任务并 start()；已在运行则忽略</td></tr>
+          <tr><td><code class="sig">cancel()</code></td><td class="ret">None</td><td>置取消标志</td></tr>
+          <tr><td><code class="sig">run()</code></td><td class="ret">None</td><td>线程体：translate_text → emit finished/failed；取消则不发信号</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="pre-translator" data-title="core/translation/pre_translator.py · 预翻译" data-group="核心层 core" data-kind="module">
+      <h2><code>core/translation/pre_translator.py</code> <span class="badge g-green">后台预翻译</span></h2>
+      <p class="purpose">加载文档后按阅读顺序把段落依次翻好、写进缓存，用户按空格时即时命中。</p>
+      <p class="path">mytraxcure/core/translation/pre_translator.py</p>
+
+      <h3 class="api-h">PreTranslator(QThread) <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>类型 / 返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">progress / all_done / failed</td><td>pyqtSignal(int,int) / () / (str)</td><td>进度 / 完成 / 失败</td></tr>
+          <tr><td><code class="sig">__init__(engine, config, segments, cache_path=None, parent=None)</code></td><td class="ret">—</td><td>自带一条 sqlite 连接（不跨线程共享）</td></tr>
+          <tr><td><code class="sig">pause()</code> / <code class="sig">resume()</code> / <code class="sig">cancel()</code></td><td class="ret">None</td><td>用户即时翻译优先时暂停 / 恢复 / 取消</td></tr>
+          <tr><td><code class="sig">total</code> <span class="kind">property</span></td><td class="ret">int</td><td>总段数</td></tr>
+          <tr><td><code class="sig">run()</code></td><td class="ret">None</td><td>线程体：逐段 make_segment_key → get → translate_text → put</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= core/fallback ======================= -->
+    <section class="mod" id="fallback" data-title="core/fallback/fallback_manager.py · 降级" data-group="核心层 core" data-kind="module">
+      <h2><code>core/fallback/fallback_manager.py</code> <span class="badge g-green">降级管理</span></h2>
+      <p class="purpose">眼动不可用时降级为鼠标模式，并把异常映射为用户可读提示。</p>
+      <p class="path">mytraxcure/core/fallback/fallback_manager.py</p>
+
+      <h3 class="api-h">InputMode <span class="kind">Enum</span></h3>
+      <table class="api">
+        <thead><tr><th>成员</th><th>值</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">GAZE</td><td>"gaze"</td></tr>
+          <tr><td class="fld">MOUSE</td><td>"mouse"</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">FallbackManager <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员 / 方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">mode</td><td>InputMode</td><td>属性：当前输入模式（默认 MOUSE）</td></tr>
+          <tr><td class="fld">last_reason</td><td>str | None</td><td>属性：最近一次降级原因</td></tr>
+          <tr><td class="fld">gaze_wrapper</td><td>GazeWrapper | None</td><td>成功进入眼动后持有的 wrapper</td></tr>
+          <tr><td><code class="sig">switch_to_mouse(reason)</code></td><td class="ret">None</td><td>切到鼠标并记录原因</td></tr>
+          <tr><td><code class="sig">try_enable_gaze(gaze_config=None)</code></td><td class="ret">bool</td><td>试开摄像头并构造 GazeWrapper；失败自动降级返回 False</td></tr>
+          <tr><td><code class="sig">handle_error(exc)</code></td><td class="ret">str</td><td>异常类型 → 用户提示（模型缺失/依赖冲突/摄像头）</td></tr>
+          <tr><td><code class="sig">is_gaze_available()</code></td><td class="ret">bool</td><td>当前是否眼动模式</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ======================= ui ======================= -->
+    <section class="mod" id="main-window" data-title="ui/main_window.py · 主窗口" data-group="界面层 ui" data-kind="module">
+      <h2><code>ui/main_window.py</code> <span class="badge g-purple">主窗口</span></h2>
+      <p class="purpose">系统装配与调度中心：装配视图、装配主链路（眼动/鼠标）、文件加载、预翻译、翻译触发、键盘与事件分发。</p>
+      <p class="path">mytraxcure/ui/main_window.py</p>
+
+      <h3 class="api-h">构造与核心对象 <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>成员</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(config, config_manager=None)</code></td><td class="ret">—</td><td>创建 parser / mapper / detector / locker / cache 等核心对象</td></tr>
+          <tr><td class="fld">parser / mapper / detector / locker</td><td>对象</td><td>FileParser / TextMapper / GazeDetector / RegionLocker</td></tr>
+          <tr><td class="fld">viewer / feedback / overlay</td><td>QWidget</td><td>ViewerView / FeedbackView / OverlayView</td></tr>
+          <tr><td class="fld">_cache / _worker / _engine</td><td>对象</td><td>CacheStore / TranslationWorker / TranslationEngine（懒加载）</td></tr>
+          <tr><td class="fld">_camera / _gaze_wrapper / _smoother / _fallback</td><td>对象</td><td>眼动链路组件</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="api-h">公开 / 关键方法 <span class="kind">class</span></h3>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">start_default_mode(tune_noise=False)</code></td><td class="ret">None</td><td>启动默认进眼动模式</td></tr>
+          <tr><td><code class="sig">load_file(path)</code></td><td class="ret">None</td><td>解析 → 切分 → 加载到视图 → 启动预翻译</td></tr>
+          <tr><td><code class="sig">on_gaze_point(point)</code></td><td class="ret">None</td><td>凝视主入口：命中 → 聚合 → 判定 → 锁定 → 反馈</td></tr>
+          <tr><td><code class="sig">on_space()</code> / <code class="sig">on_esc()</code></td><td class="ret">None</td><td>空格触发/关闭翻译；ESC 取消并解锁</td></tr>
+          <tr><td><code class="sig">closeEvent(event)</code></td><td class="ret">None</td><td>停预翻译/摄像头/凝视窗口，释放资源</td></tr>
+          <tr><td><code class="sig">keyPressEvent(event)</code> / <code class="sig">eventFilter(obj, event)</code></td><td class="ret">None / bool</td><td>空格/ESC/↑↓翻句；Resize 时同步浮层尺寸</td></tr>
+        </tbody>
+      </table>
+      <table class="api">
+        <thead><tr><th>内部方法</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">_build_ui() / _build_menu() / _build_status_bar()</code></td><td>装配中央区、菜单（文件/模式/设置）、常驻状态栏控件</td></tr>
+          <tr><td><code class="sig">_on_gaze_frame(frame)</code></td><td>眼动主链路调度（extract → 门控 → predict → smooth → DPI → on_gaze_point）</td></tr>
+          <tr><td><code class="sig">_enable_gaze_mode(ask_calibration=True, tune_noise=False)</code></td><td>进入眼动：启用 wrapper、加载校准、启动 CameraThread</td></tr>
+          <tr><td><code class="sig">_enable_mouse_mode()</code></td><td>停摄像头、恢复鼠标轮询定时器</td></tr>
+          <tr><td><code class="sig">_run_inline_calibration(store, env)</code> / <code class="sig">_run_noise_tuning()</code></td><td>菜单触发的手动校准 / 5 点噪声微调</td></tr>
+          <tr><td><code class="sig">_trigger_translation(region)</code></td><td>取文本 → 建键 → 查缓存 → 未命中启动 worker</td></tr>
+          <tr><td><code class="sig">_on_translation_done(result)</code> / <code class="sig">_on_translation_failed(message)</code></td><td>显示浮层 + 写缓存 / 报错不写缓存</td></tr>
+          <tr><td><code class="sig">_start_pre_translation() / _stop_pre_translation() / _resume_pre_translation()</code></td><td>预翻译线程生命周期</td></tr>
+          <tr><td><code class="sig">_set_reading_mode(step)</code> / <code class="sig">_on_reading_step(screen, total)</code></td><td>切换逐句/连续滚动；更新阅读进度</td></tr>
+          <tr><td><code class="sig">_poll_cursor()</code></td><td>鼠标模式：33ms 定时取 QCursor.pos() 复用 on_gaze_point</td></tr>
+          <tr><td><code class="sig">_eyetrax_to_qt(x, y)</code> <span class="kind">staticmethod</span></td><td>物理像素 → Qt 逻辑像素（除以 devicePixelRatio）</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="viewer-view" data-title="ui/viewer_view.py · 阅读视图" data-group="界面层 ui" data-kind="module">
+      <h2><code>ui/viewer_view.py</code> <span class="badge g-purple">阅读视图</span></h2>
+      <p class="purpose">文档显示控件：持有渲染器，处理滚动/逐句步进、鼠标凝视回调、视口同步与绘制。</p>
+      <p class="path">mytraxcure/ui/viewer_view.py</p>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(parent=None)</code></td><td class="ret">—</td><td>开启鼠标追踪</td></tr>
+          <tr><td><code class="sig">set_mapper(mapper)</code> / <code class="sig">set_gaze_callback(cb)</code></td><td class="ret">None</td><td>注入映射器 / 凝视回调</td></tr>
+          <tr><td><code class="sig">set_scroll_locked(locked)</code></td><td class="ret">None</td><td>浮层显示期间冻结滚动</td></tr>
+          <tr><td><code class="sig">set_reading_config(reading)</code> / <code class="sig">set_step_callback(cb)</code></td><td class="ret">None</td><td>逐句参数 / 换屏回调</td></tr>
+          <tr><td><code class="sig">step_mode</code> <span class="kind">property</span></td><td class="ret">bool</td><td>当前是否逐句模式</td></tr>
+          <tr><td><code class="sig">set_reading_mode(step_mode)</code></td><td class="ret">None</td><td>切换模式并重建渲染器</td></tr>
+          <tr><td><code class="sig">prime_reading_blocks()</code></td><td class="ret">None</td><td>先算版面并注册块（预翻译取段用）</td></tr>
+          <tr><td><code class="sig">load_document(document)</code></td><td class="ret">None</td><td>载入文档并重建渲染器</td></tr>
+          <tr><td><code class="sig">step_reading(steps)</code></td><td class="ret">bool</td><td>按句步进；超长句先走内部滚动</td></tr>
+          <tr><td><code class="sig">scroll_contents(dx, dy)</code></td><td class="ret">None</td><td>连续滚动模式滚动并夹在版面内</td></tr>
+          <tr><td><code class="sig">wheelEvent(event)</code> / <code class="sig">mouseMoveEvent(event)</code> / <code class="sig">paintEvent(event)</code></td><td class="ret">None</td><td>滚轮分派 / 鼠标凝视 / 只渲染可视区</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="overlay-view" data-title="ui/overlay_view.py · 译文浮层" data-group="界面层 ui" data-kind="module">
+      <h2><code>ui/overlay_view.py</code> <span class="badge g-purple">译文浮层</span></h2>
+      <p class="purpose">译文浮层控件：加载态与译文态绘制、高度自适应、换行与截断。</p>
+      <p class="path">mytraxcure/ui/overlay_view.py</p>
+
+      <h3 class="api-h">OverlayMode <span class="kind">Enum</span></h3>
+      <table class="api">
+        <thead><tr><th>成员</th><th>值</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="fld">TRANSLUCENT</td><td>"translucent"</td><td>半透明浮层（默认）</td></tr>
+          <tr><td class="fld">REPLACE</td><td>"replace"</td><td>替换式覆盖</td></tr>
+        </tbody>
+      </table>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">show_translation(region, result, mode=None)</code></td><td class="ret">None</td><td>显示译文（高度按文本估算扩展）</td></tr>
+          <tr><td><code class="sig">show_loading(region)</code></td><td class="ret">None</td><td>显示“翻译中…”</td></tr>
+          <tr><td><code class="sig">hide_overlay()</code></td><td class="ret">None</td><td>隐藏并清状态</td></tr>
+          <tr><td><code class="sig">is_showing</code> / <code class="sig">is_loading</code> <span class="kind">property</span></td><td class="ret">bool</td><td>状态查询</td></tr>
+          <tr><td><code class="sig">set_mode(mode)</code></td><td class="ret">None</td><td>切换显示模式</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="feedback-view" data-title="ui/feedback_view.py · 蓝框反馈" data-group="界面层 ui" data-kind="module">
+      <h2><code>ui/feedback_view.py</code> <span class="badge g-purple">蓝框反馈</span></h2>
+      <p class="purpose">锁定选区的可视化：圆角靛蓝半透明框，鼠标事件穿透。</p>
+      <p class="path">mytraxcure/ui/feedback_view.py</p>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(parent=None)</code></td><td class="ret">—</td><td>WA_TransparentForMouseEvents</td></tr>
+          <tr><td><code class="sig">show_region(region)</code> / <code class="sig">hide_region()</code></td><td class="ret">None</td><td>显示 / 清除高亮</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="gaze-cursor-view" data-title="ui/gaze_cursor_view.py · 红点" data-group="界面层 ui" data-kind="module">
+      <h2><code>ui/gaze_cursor_view.py</code> <span class="badge g-purple">凝视点</span></h2>
+      <p class="purpose">独立顶层无边框窗口绘制红色凝视点（置顶、穿透鼠标、不抢焦点）。</p>
+      <p class="path">mytraxcure/ui/gaze_cursor_view.py</p>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(x, y, w, h)</code></td><td class="ret">—</td><td>FramelessWindowHint | WindowStaysOnTopHint | Tool | WindowTransparentForInput</td></tr>
+          <tr><td><code class="sig">set_gaze_point(x, y)</code></td><td class="ret">None</td><td>更新红点位置并重绘</td></tr>
+          <tr><td><code class="sig">clear()</code></td><td class="ret">None</td><td>隐藏红点（丢脸/眨眼/转头时）</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="gaze-settings-dialog" data-title="ui/gaze_settings_dialog.py · 滤波设置" data-group="界面层 ui" data-kind="module">
+      <h2><code>ui/gaze_settings_dialog.py</code> <span class="badge g-purple">滤波设置</span></h2>
+      <p class="purpose">眼动平滑强度滑条：拖动即生效，确定写入配置，取消回退原值。</p>
+      <p class="path">mytraxcure/ui/gaze_settings_dialog.py</p>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(config, config_manager=None, on_ema_changed=None, parent=None)</code></td><td class="ret">—</td><td>滑条范围 EMA_MIN(0.10)~EMA_MAX(0.50)</td></tr>
+          <tr><td><code class="sig">accept()</code></td><td class="ret">None</td><td>写入 config.local.json 并关闭</td></tr>
+          <tr><td><code class="sig">reject()</code></td><td class="ret">None</td><td>回退原 ema_alpha 并关闭</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="mod" id="settings-view" data-title="ui/settings_view.py · 设置入口" data-group="界面层 ui" data-kind="module">
+      <h2><code>ui/settings_view.py</code> <span class="badge g-purple">设置入口</span></h2>
+      <p class="purpose">清理入口：清空翻译缓存与校准文件。</p>
+      <p class="path">mytraxcure/ui/settings_view.py</p>
+      <table class="api">
+        <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><code class="sig">__init__(config_manager, cache_store, parent=None)</code></td><td class="ret">—</td><td>—</td></tr>
+          <tr><td><code class="sig">clear_cache()</code></td><td class="ret">None</td><td>CacheStore.clear_all()</td></tr>
+          <tr><td><code class="sig">clear_calibration()</code></td><td class="ret">None</td><td>CalibrationStore().clear()</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <div class="empty" id="empty">没有匹配的模块或接口，试试更短的关键词。</div>
+  </main>
+</div>
+
+<button class="totop" id="totop" title="回到顶部">↑</button>
+
+<script src="js/app.js"></script>
+</body>
+</html>

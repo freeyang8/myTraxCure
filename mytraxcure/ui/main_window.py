@@ -4,7 +4,6 @@ from __future__ import (
 
 from pathlib import Path
 
-from eyetrax.utils.screen import get_screen_size
 from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtGui import QAction, QCursor, QGuiApplication, QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -31,6 +30,7 @@ from mytraxcure.core.gaze.calibration_store import (
     CalibrationStore,
 )
 from mytraxcure.core.gaze.camera import CameraThread
+from mytraxcure.core.gaze.screen_utils import primary_screen_size
 from mytraxcure.core.gaze.startup_calibration import run_and_save
 from mytraxcure.core.gaze_logic.gaze_detector import GazeDetector
 from mytraxcure.core.gaze_logic.region_locker import RegionLocker
@@ -52,6 +52,11 @@ from mytraxcure.ui.gaze_cursor_view import GazeCursorView
 from mytraxcure.ui.gaze_settings_dialog import GazeSettingsDialog
 from mytraxcure.ui.overlay_view import OverlayMode, OverlayView
 from mytraxcure.ui.viewer_view import ViewerView
+
+# 逐句模式的翻句键（长按连发）
+_STEP_DOWN_KEYS = (Qt.Key.Key_Down, Qt.Key.Key_PageDown)
+_STEP_UP_KEYS = (Qt.Key.Key_Up, Qt.Key.Key_PageUp)
+_STEP_KEYS = _STEP_DOWN_KEYS + _STEP_UP_KEYS
 
 
 class MainWindow(QMainWindow):
@@ -126,6 +131,9 @@ class MainWindow(QMainWindow):
         self.viewer = ViewerView() #文件查看器控件，显示文档内容区域
         self.viewer.set_mapper(self.mapper)  #坐标映射用刚才创建的那个 mapper 对象
         self.viewer.set_gaze_callback(self.on_gaze_point)  # P0：鼠标移动模拟视线
+        self.viewer.set_reading_config(self.config.reading)  # 逐句步进参数
+        self.viewer.set_reading_mode(self.config.reading.step_mode)
+        self.viewer.set_step_callback(self._on_reading_step)  # 换屏 → 更新阅读进度
         self._stack.addWidget(self.viewer) #把 viewer 添加到堆叠窗口中
 
         self.feedback = FeedbackView(self.viewer) #高亮反馈层，父控件是 viewer
@@ -198,7 +206,7 @@ class MainWindow(QMainWindow):
         if report is not None:
             self._run_noise_tuning()
 
-    #滤波微调：9 个点各盯约 1s，收集 predict 抖动 → 方差写入 measurementNoiseCov。
+    #滤波微调：5 个点各盯约 1s，收集 predict 抖动 → 方差写入 measurementNoiseCov。
     #前提：摄像头空闲（CameraThread 未启动）、wrapper 已加载校准模型。
     def _run_noise_tuning(self) -> None:
         if self._gaze_wrapper is None or self._smoother is None:
@@ -301,7 +309,7 @@ class MainWindow(QMainWindow):
         self._smoother = SmootherAdapter(ema_alpha=self.config.gaze.ema_alpha)
 
         #准备校准环境
-        sw,sh = get_screen_size()  # eyetrax 物理分辨率：仅用于 env 三元组命名/校准，勿用于 Qt 坐标
+        sw,sh = primary_screen_size()  # 主屏物理分辨率：校准与 cv2 全屏窗口都在主屏，坐标才对得上
         # GazeCursorView 是 Qt 顶层窗口 → 用 Qt 逻辑几何（物理分辨率会让窗口超出屏幕 dpr 倍）
         _scr = QGuiApplication.primaryScreen()
         if _scr is not None:
@@ -409,6 +417,13 @@ class MainWindow(QMainWindow):
         mouse_action.triggered.connect(self._enable_mouse_mode)
         mode_menu.addAction(mouse_action)
 
+        # 阅读方式：逐句步进（一屏 N 句，滚轮一次一句）/ 连续滚动
+        self._step_action = QAction("逐句步进阅读", self)
+        self._step_action.setCheckable(True)
+        self._step_action.setChecked(bool(self.config.reading.step_mode))
+        self._step_action.toggled.connect(self._set_reading_mode)
+        mode_menu.addAction(self._step_action)
+
         #添加“设置”菜单
         settings_menu = menu_bar.addMenu("设置(&S)")
         assert settings_menu is not None
@@ -432,14 +447,45 @@ class MainWindow(QMainWindow):
         if self._smoother is not None:
             self._smoother.set_ema_alpha(alpha)
 
+    #换屏回调：状态栏常驻"读到哪里了"，逐句模式下尤其需要（一屏就两句）
+    def _on_reading_step(self, screen, total: int) -> None:
+        last = min(screen.top + screen.n, total)
+        percent = int(round(last / total * 100)) if total else 0
+        self._reading_label.setText(
+            f"阅读: 第 {screen.top + 1}–{last} 句 / 共 {total} 句（{percent}%）"
+        )
+
+    #切换阅读方式：逐句步进（句子即凝视/翻译单位）↔ 连续滚动（段落即单位）
+    def _set_reading_mode(self, step: bool) -> None:
+        self.config.reading.step_mode = bool(step)
+        self.viewer.set_reading_mode(bool(step))
+        #块粒度变了（句子 ↔ 段落），检测窗/选区/悬停状态全部失效
+        self.detector.reset()
+        self._last_hover_key = None
+        self._locked_region = None
+        self._locked_para_key = None
+        self.feedback.hide_region()
+        if self._document is not None and not step:
+            #切回连续滚动：整篇段落块重新注册（步进模式注册的是句子块）
+            self.mapper.register_blocks(self._document.blocks)
+        self.viewer.prime_reading_blocks()
+        self.viewer.update()
+        if not step:
+            self._reading_label.setText("阅读: 连续滚动")
+        self._status_bar.showMessage("阅读方式：逐句步进（滚轮一次一句）" if step else "阅读方式：连续滚动")
+
     def _build_status_bar(self) -> None:
         bar = self.statusBar()
         assert bar is not None  # QMainWindow 首次调用 statusBar() 必然创建状态栏
         self._status_bar: QStatusBar = bar
         self._mode_label = QLabel("模式: 鼠标")
+        self._reading_label = QLabel("阅读: 连续滚动")  # 逐句模式下显示"第 i–j 句 / 共 n 句"
         self._fps_label = QLabel("FPS: -")
         self._trans_label = QLabel("翻译: 空闲")
-        bar.addWidget(self._mode_label)
+        # 模式与阅读进度用常驻控件：addWidget 的会被 statusBar().showMessage() 临时盖掉，
+        # 而"读到哪一句"恰恰是随时要有、不能被提示消息挤没的信息
+        bar.addPermanentWidget(self._mode_label)
+        bar.addPermanentWidget(self._reading_label)
         bar.addPermanentWidget(self._fps_label)
         bar.addPermanentWidget(self._trans_label)
 
@@ -458,11 +504,14 @@ class MainWindow(QMainWindow):
         notices = make_ocr_notices(document.meta.get("needs_ocr_pages") or [])
         document.blocks = segment_blocks(list(document.blocks) + notices)
         self._document = document
-        self.mapper.register_blocks(self._document.blocks)#注册文本块到映射器
+        if not self.viewer.step_mode:
+            #逐句模式下由 StepRenderer 注册句子级块（每屏重写一次屏内坐标）
+            self.mapper.register_blocks(self._document.blocks)#注册文本块到映射器
         self.detector.reset() #重置眼动检测器
         self._locked_region = None #清空锁定区域
         self._locked_para_key = None
         self.viewer.load_document(self._document) #视图层加载文档（首次绘制时回填 bbox）
+        self.viewer.prime_reading_blocks()  #步进模式：先注册句子块，预翻译才有段可取
         self._status_bar.showMessage(f"已加载: {path.name}")
         self._start_pre_translation()
 
@@ -527,10 +576,14 @@ class MainWindow(QMainWindow):
         # )
 
         #带容差命中（需求 6.8.6 两段式）：视线抖动 + 校准误差下，精确命中(tolerance=0)几乎必失败。
-        #v6：校准误差不可获取 → 容差恒用 GazeConfig.hit_tolerance_px
+        #v6：校准误差不可获取 → 容差恒用配置值；逐句模式用更大的请求容差，
+        #实际会被块自己的 hit_pad_max（半个空隙）夹住，保证相邻句命中域不相交
+        tolerance = (
+            gaze_cfg.step_hit_tolerance_px if self.viewer.step_mode else gaze_cfg.hit_tolerance_px
+        )
         block = self.mapper.hit_test(
             (point.x, point.y),
-            tolerance_px=gaze_cfg.hit_tolerance_px,
+            tolerance_px=tolerance,
         )
         #未命中才做"最近块回退"
         if block is None and self.mapper._blocks:
@@ -539,10 +592,13 @@ class MainWindow(QMainWindow):
                 self.mapper._blocks,
                 key = lambda b : b.distance_to(dx,dy)
             )
-            tol = min(
-                gaze_cfg.hit_tolerance_px, #默认容差
-                nearest.h * gaze_cfg.tolerance_ratio_of_block_h #块高度乘以比例系数
-            )
+            if nearest.hit_pad_max is not None:
+                tol = nearest.hit_pad_max        #逐句模式：该块允许的最大不越界容差
+            else:
+                tol = min(
+                    tolerance,                       #当前模式的请求容差
+                    nearest.h * gaze_cfg.tolerance_ratio_of_block_h #块高度乘以比例系数
+                )
             if nearest.distance_to(dx,dy) <= tol:
                 block = nearest
             
@@ -588,7 +644,12 @@ class MainWindow(QMainWindow):
                 w=screen_region.w,
                 h=screen_region.h,
             )
-            region = self.locker.lock_block(local, bounds=bounds)
+            # 逐句模式：句框按 44px 大字号算，一句就能超过 RegionConfig 的上限，
+            # 那里是给段落模式调的，这里改用"屏内就这么大"作为上限
+            block_max = (
+                (self.viewer.width(), self.viewer.height()) if self.viewer.step_mode else None
+            )
+            region = self.locker.lock_block(local, bounds=bounds, max_size=block_max)
             # 返回 None = 段落并集超限（"整页一大块"）→ 落到点模式回退
         if region is None:
             local_point = GazePoint(
@@ -725,6 +786,11 @@ class MainWindow(QMainWindow):
     #----------------事件分发---------------------
     #键盘响应
     def keyPressEvent(self,event)->None:
+        # 逐句模式下 ↑↓/PgUp/PgDn 等价于滚轮；长按连发不拦（滚轮之外的第二条通路）
+        if self.viewer.step_mode and event.key() in _STEP_KEYS:
+            self.viewer.step_reading(1 if event.key() in _STEP_DOWN_KEYS else -1)
+            event.accept()
+            return
         if event.isAutoRepeat():  # 过滤按住空格的自动重复，避免显示/隐藏来回闪烁
             event.accept()
             return
@@ -740,6 +806,9 @@ class MainWindow(QMainWindow):
     def eventFilter(self,obj,event)->bool:
         if obj is self.viewer:
             if event.type() == event.Type.KeyPress:
+                if self.viewer.step_mode and event.key() in _STEP_KEYS:
+                    self.viewer.step_reading(1 if event.key() in _STEP_DOWN_KEYS else -1)
+                    return True
                 if event.isAutoRepeat():
                     return True  # 过滤自动重复，避免显示/隐藏来回闪烁
                 if event.key() == Qt.Key.Key_Space:

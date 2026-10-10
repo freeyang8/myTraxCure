@@ -70,6 +70,9 @@ class TextBlock:
     block_id: str = ""
     source: str = ""  # pdf / txt / word（v6.2：不支持图片，无 ocr 来源）
     para_key: str = ""  # 段落聚合键，解析期写入；为空时回退用 block_id
+    # 容差上限（文档坐标）：由版面决定，保证与相邻块的容差域不相交。
+    # None = 不限制（连续滚动模式整篇是连续排版，用全局容差即可）
+    hit_pad_max: float | None = None
 
     @property
     def right(self) -> float:
