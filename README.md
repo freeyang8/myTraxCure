@@ -5,11 +5,15 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Stars](https://img.shields.io/github/stars/freeyang8/myTraxCure?style=social)](https://github.com/freeyang8/myTraxCure)
 
+> ⚠️ **本项目是实验性质的尝试，不是可上线的产品。**
+> 它用于验证"眼动 → 选区 → 翻译 → 覆盖"这条链路是否走得通，代码、参数与默认值都在持续试错中，未做稳定性、性能、并发、安全与隐私方面的工程化打磨，也**不建议**用于生产环境或关键任务。
+> 眼动精度高度依赖硬件与坐姿（见下文《摄像头与人脸怎么摆》），不同机器上的表现差异可能很大；翻译质量取决于你本地选择的模型。请把它当作一个可运行的原型来读、来改。
+
 ---
 
 ## 项目简介
 
-myTraxCure 是一款基于眼动追踪的桌面翻译软件：它通过摄像头实时捕捉你的注视点，自动锁定你正在阅读的段落，并将译文以覆盖层的形式叠加在原文上方，核心链路为 **眼动 → 选区 → 翻译 → 覆盖**。项目封装了 [eyetrax](https://pypi.org/project/eyetrax/) 0.4.0 作为眼动核心，配合可插拔的本地大模型翻译引擎（当前为 Ollama），全程数据不出本机。适合需要长时间阅读外文 PDF、Word 或扫描件的学习者、研究者，以及手部操作不便的 accessibility 用户。
+myTraxCure 是一个基于眼动追踪的桌面翻译**实验原型**：它通过摄像头实时捕捉你的注视点，自动锁定你正在阅读的段落，并将译文以覆盖层的形式叠加在原文上方，核心链路为 **眼动 → 选区 → 翻译 → 覆盖**。项目封装了 [eyetrax](https://pypi.org/project/eyetrax/) 0.4.0 作为眼动核心，配合可插拔的本地大模型翻译引擎（当前为 Ollama），全程数据不出本机。适合需要长时间阅读外文 PDF、Word 或扫描件的学习者、研究者，以及手部操作不便的 accessibility 用户。
 
 ---
 
