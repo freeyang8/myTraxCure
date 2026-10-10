@@ -1,3 +1,19 @@
+"""模块名称：file_viewer.py
+
+功能描述：把 ParsedDocument 排成可渲染的版面并画出来，是全类型文档唯一的落地环节。
+两条并行链路：DocumentRenderer 负责"整篇连续纵向版面 + 像素滚动"的段落模式，
+StepRenderer 负责"每屏 N 句、整句步进"的逐句模式；两者都借 TextMapper 回填 bbox。
+
+关键约束：
+- 该模块是 TXT / Word 获得坐标的唯一通路：它们解析期 bbox 恒为 0，必须等这里的
+  重排把 bbox 回填，才谈得上凝视命中与段落聚合。回填完会置 document.meta 的
+  layout_pending 为 False，这是"可以开始命中"的信号。
+- 版面参数（行高 / 边距 / 字号）是成组的：它们共同决定 bbox 大小，而眼动输入的命中率
+  直接取决于 bbox 大小。单独调一个会让实测的命中率失效。
+- 重的结果会被 StepRenderer 按"屏内坐标"覆盖：同一批 block 的坐标含义取决于当前由
+  哪个渲染器接管，切换阅读模式必须重新注册。
+"""
+
 from __future__ import annotations
 
 import math
@@ -42,7 +58,23 @@ STEP_SOURCE = "STEP"   # 逐句模式合成块的来源标记
 _PAPER = (250, 248, 244)
 _INK = (22, 24, 28)
 
+
 def _make_font(pixel_size: int | None = None, bold: bool = False):
+    """构造阅读用字体。
+
+    Args:
+        pixel_size: 像素字号；传 None 则用 _FONT_SIZE 的磅值。
+            逐句模式要按视口自适应字号，只能传像素值。
+        bold: 是否加粗，标题排版使用。
+
+    Returns:
+        QFont 实例。
+
+    Notes:
+        PyQt6 在函数内部延迟导入而非模块级导入：本模块会被纯数据与单元测试路径引用，
+        模块级导入会把 Qt 依赖带给不需要渲染的调用方。
+        字体族按"微软雅黑 → 宋体 → Arial"回退，覆盖中英文混排的缺字情况。
+    """
     from PyQt6.QtGui import QFont
 
     font = QFont()
@@ -55,8 +87,14 @@ def _make_font(pixel_size: int | None = None, bold: bool = False):
         font.setBold(True)
     return font
 
+
 @dataclass
 class ParagraphLayout:
+    """一个段落排完后的结果：纵向位置、折出的行、成员块与是否占位提示。
+
+    Attributes 之外的约定：blocks 与 lines 指向同一批数据——lines 是文本层面的折行结果，
+    blocks 的 bbox 也已按这些行回填完毕，二者不可只更新其一。
+    """
 
     para_key: str
     y0: int
@@ -65,22 +103,33 @@ class ParagraphLayout:
     blocks: list[TextBlock]
     is_notice: bool = False
 
+
 @dataclass
 class ReflowLayout:
+    """整篇文档的一次重排结果：段落序列与版面尺寸（width / height）。"""
 
     paragraphs: list[ParagraphLayout] = field(default_factory=list)
     width: int = 0
     height: int = 0
 
+
 class DocumentRenderer:
     """全类型统一重排渲染：按段落顺序纵向排布，只渲染可视区域。
 
-    v1 不分页——整篇文档就是一条连续的纵向版面（逻辑页恒为 0）。
+    不分页——整篇文档就是一条连续的纵向版面（逻辑页恒为 0）。
     不预先拼整页大图：超长文档（几千段）会撞上 Qt 位图的 32767px 上限，
     改为按视口渲染后，每帧只分配"窗口大小"的图，滚动深度不受限。
+
+    生命周期：构造后由排版惰性触发 _ensure_layout，耗时只发生一次；
+    视口变化不需要重排版面，只有文档或配置变了才调 invalidate_cache。
     """
 
     def __init__(self, document: ParsedDocument) -> None:
+        """持有文档并置空版面缓存。
+
+        Args:
+            document: 解析产物；其 blocks 会被就地回填 bbox（文档对象被修改）。
+        """
         self.document = document
         self._layout: ReflowLayout | None = None
         self._font: Any = None
@@ -88,10 +137,24 @@ class DocumentRenderer:
         self._mapper: TextMapper | None = None
 
     def set_mapper(self, mapper: TextMapper | None) -> None:
+        """挂载映射器，排版完成后立刻用它重注册坐标。
+
+        Args:
+            mapper: TextMapper 实例；传 None 表示只在纯渲染场景下使用。
+        """
         self._mapper = mapper
 
     # ---- 版面 ------------------------------------------------------------
     def _ensure_layout(self) -> ReflowLayout:
+        """惰性排版并返回结果；已排过直接用缓存。
+
+        Returns:
+            ReflowLayout，同时已完成 block bbox 回填与（若有）映射器重注册。
+
+        Notes:
+            排版是唯一一处副作用较大的操作：它会改写 document.meta 的 layout_pending，
+            因此必须排在 BST mapper 注册之前，否则映射器拿到的是零坐标。
+        """
         if self._layout is not None:
             return self._layout
 
@@ -105,6 +168,7 @@ class DocumentRenderer:
         y = 0
         for para_key, blocks in group_paragraphs(self.document.blocks):
             is_notice = blocks[0].source == NOTICE_SOURCE
+            # 提示块整段一个框、原本就在它的 text 里，走 _fill_blocks；其余段读取并集文本
             text = blocks[0].text if is_notice else paragraph_text(blocks)
             if not text.strip():
                 continue
@@ -126,6 +190,7 @@ class DocumentRenderer:
         self._layout = ReflowLayout(
             paragraphs=paragraphs,
             width=_WRAP_WIDTH + _MARGIN * 2,
+            # 末段后不再追加 _PARA_GAP，减去即真实内容高；再取下限避免短文档贴顶
             height=max(y - _PARA_GAP, _MIN_HEIGHT),
         )
         self.document.meta["layout_pending"] = False
@@ -134,6 +199,7 @@ class DocumentRenderer:
         return self._layout
 
     def content_size(self) -> tuple[int, int]:
+        """返回版面尺寸 (width, height)，供视图设置滚动条范围。"""
         layout = self._ensure_layout()
         return layout.width, layout.height
 
@@ -144,11 +210,20 @@ class DocumentRenderer:
 
         每个 block 分到它在段落文本里占的字符区间所覆盖的那几行——
         段内 block 于是天然沿 y 连续，段落并集 bbox 就等于整段的排版范围。
+
+        Args:
+            blocks: 同一段落的块，按阅读顺序排列。
+            text: 该段拼接后的完整文本，与 ranges 的下标空间一致。
+            ranges: 折行结果的字符区间列表。
+            y0: 该段起始纵坐标。
+            fm: QFontMetrics，用来量实际像素宽。
         """
         _, spans = paragraph_text_with_spans(blocks)
         covered: set[int] = set()
         starts = [a for a, _ in ranges]
         for b, start, end in spans:
+            # bisect 找起止字符落在哪一行：比逐行线性扫描少一次全行遍历，
+            # 段落折出几十行时的差别才明显
             i0 = max(bisect_right(starts, start) - 1, 0)
             i1 = max(bisect_right(starts, end - 1) - 1, i0)
             b.x = float(_MARGIN)
@@ -163,7 +238,14 @@ class DocumentRenderer:
     def _fill_blocks(
         self, blocks: list[TextBlock], lines: list[str], y0: int, fm: Any
     ) -> None:
-        """提示块（扫描页占位）整段一个框。"""
+        """提示块（扫描页占位）整段一个框。
+
+        Args:
+            blocks: 提示块的成员（通常只有一个）。
+            lines: 折行后的行文本，用来取最大行宽。
+            y0: 该段起始纵坐标。
+            fm: QFontMetrics，用来量实际像素宽。
+        """
         width = float(max(fm.horizontalAdvance(line) for line in lines))
         for b in blocks:
             b.x = float(_MARGIN)
@@ -175,7 +257,21 @@ class DocumentRenderer:
     def render_viewport(
         self, x_offset: float, y_offset: float, width: int, height: int
     ) -> np.ndarray:
-        """渲染文档坐标 (x_offset, y_offset) 起、width×height 大的可视区域。"""
+        """渲染文档坐标 (x_offset, y_offset) 起、width×height 大的可视区域。
+
+        Args:
+            x_offset: 视口左上角的文档横坐标。
+            y_offset: 视口左上角的文档纵坐标。
+            width: 目标图像宽度（像素）。
+            height: 目标图像高度（像素）。
+
+        Returns:
+            RGB 三通道 uint8 数组，形状 (height, width, 3)。
+
+        Notes:
+            先用 translate 把原点挪到视口位置，之后一律按文档坐标绘制，
+            省掉每行的坐标换算。视口外的段落直接跳过。
+        """
         from PyQt6.QtCore import QRect, Qt
         from PyQt6.QtGui import QColor, QImage, QPainter
 
@@ -204,6 +300,7 @@ class DocumentRenderer:
     # ---- 折行 ------------------------------------------------------------
     @staticmethod
     def _wrap_text(fm: Any, text: str, max_w: int) -> list[str]:
+        """文本按宽度折行，返回行文本列表；详见 _wrap_ranges。"""
         return [text[a:b] for a, b in DocumentRenderer._wrap_ranges(fm, text, max_w)]
 
     @staticmethod
@@ -211,6 +308,19 @@ class DocumentRenderer:
         """按宽度折行，返回每行的字符区间 [start, end)。
 
         返回区间而不是字符串：渲染要用行文本，回填 bbox 还要知道"每个 block 占了哪几行"。
+
+        Args:
+            fm: QFontMetrics，用来量宽度。
+            text: 待折行的完整文本。
+            max_w: 单行最大像素宽度。
+
+        Returns:
+            区间列表，覆盖整段文本；空文本返回 [(0, 0)]。
+
+        Notes:
+            超宽 token（长英文串、无标点 CJK 整段）按字符二分求切点——逐字回退在几千字的
+            长句上是 O(n²)，会把界面直接卡死；逐句模式下一步就是整个长句，
+            比段落模式更容易撞上这种情况。
         """
         if not text:
             return [(0, 0)]
@@ -252,6 +362,21 @@ class DocumentRenderer:
 
     @staticmethod
     def _qimage_to_rgb_array(qimg: Any, w: int, h: int) -> np.ndarray:
+        """QImage → 紧致的 RGB 数组。
+
+        Args:
+            qimg: QImage，格式为 RGB888。
+            w: 有效宽度（像素）。
+            h: 高度（像素）。
+
+        Returns:
+            形状 (h, w, 3) 的 uint8 数组副本。
+
+        Notes:
+            Qt 每行按 4 字节对齐，bytesPerLine 常大于 w×3；直接 reshape 会错位，
+            必须先按字节窗口截掉行尾 padding。copy 是因为 constBits 是缓冲区的视图，
+            QImage 析构后就成了野指针。
+        """
         bpl = qimg.bytesPerLine()
         buf = qimg.constBits()
         buf.setsize(bpl * h)
@@ -262,6 +387,7 @@ class DocumentRenderer:
 
     # ---- 缓存 ------------------------------------------------------------
     def invalidate_cache(self) -> None:
+        """丢弃版面缓存；下次取版面会重排并重新回填 bbox。"""
         self._layout = None
 
 
@@ -278,7 +404,11 @@ class StepUnit:
 
 @dataclass
 class StepScreen:
-    """一屏的排版结果：视口尺寸或首句变了就重算。"""
+    """一屏的排版结果：视口尺寸或首句变了就重算。
+
+    solo 为真表示该句超长到字号触底仍放不下，只能独占一屏并开放内部滚动；
+    shrunk 为真表示本屏字号已低于配置值，用于提示或回归排查。
+    """
 
     top: int
     n: int
@@ -296,6 +426,7 @@ class StepScreen:
 
     @property
     def used_height(self) -> float:
+        """本屏所有句高之和加上句间空隙：不含 pad_top 的实际占用高度。"""
         return sum(self.heights) + self.gap * max(self.n - 1, 0)
 
 
@@ -305,9 +436,18 @@ class StepRenderer:
     与 DocumentRenderer（整篇连续纵向版面 + 像素滚动）不同，这里没有全局滚动坐标：
     句高、字号、段间距都按当前视口算，因此映射器看到的永远是"屏内坐标"
     （scroll_offset 恒 0），每次换屏把句子级 block 重注册一遍。
+
+    生命周期：units（句子切分）只算一次；screen（本屏排版）按 (宽, 高, 首句下标)
+    为键缓存，任一项变化就重算。
     """
 
     def __init__(self, document: ParsedDocument, reading: ReadingConfig) -> None:
+        """持有文档与阅读配置，句子列表与屏幕结果都留到首次使用时再算。
+
+        Args:
+            document: 解析产物，句子从它的段落文本里切出来。
+            reading: 阅读配置，提供字号、行高倍数、边距、间隙等自适应参数。
+        """
         self.document = document
         self.reading = reading
         self._units: list[StepUnit] | None = None
@@ -320,16 +460,33 @@ class StepRenderer:
         self._mapper: TextMapper | None = None
 
     def set_mapper(self, mapper: TextMapper | None) -> None:
+        """挂载映射器，每次换屏后用它重注册全部句子的屏内坐标。"""
         self._mapper = mapper
 
     # ---- 句子单位 --------------------------------------------------------
     @property
     def units(self) -> list[StepUnit]:
+        """全篇句子列表（惰性构建）。
+
+        切分结果在全篇范围内稳定：index 一旦分配就不会随翻屏变化，
+        因此句子既是排版单位，也是翻译缓存键的天然下标。
+        """
         if self._units is None:
             self._units = self._build_units()
         return self._units
 
     def _build_units(self) -> list[StepUnit]:
+        """切出全篇句子，每句配一个合成 TextBlock。
+
+        Returns:
+            StepUnit 列表，index 在全篇范围内连续。
+
+        Notes:
+            每个句子都造一个 source 为 STEP_SOURCE 的合成块：原来的 block 是按行或按
+            视觉行切的，一个字也装不下"跨行的一句"。para_key 用 sentence-{index}
+            保证唯一，映射器据此做命中、取文本、建翻译缓存键。
+            提示块与纯分隔符行直接丢弃——它们不承载可翻译的内容。
+        """
         units: list[StepUnit] = []
         for _para_key, blocks in group_paragraphs(self.document.blocks):
             is_notice = blocks[0].source == NOTICE_SOURCE
@@ -363,15 +520,33 @@ class StepRenderer:
     # ---- 排版 ------------------------------------------------------------
     @property
     def screen(self) -> StepScreen | None:
+        """最近一次排版结果；ensure_screen 被调用之前为 None。"""
         return self._screen
 
     def content_size(self) -> tuple[int, int]:
-        """步进模式没有可滚动的长版面：返回视口尺寸本身，滚轮位移被夹成 0。"""
+        """步进模式没有可滚动的长版面：返回视口尺寸本身，滚轮位移被夹成 0。
+
+        Returns:
+            (width, height)。未排版时返回 (0, 0)。
+        """
         if self._screen_key is None:
             return (0, 0)
         return (self._screen_key[0], self._screen_key[1])
 
     def ensure_screen(self, width: int, height: int) -> StepScreen:
+        """按视口尺寸取本屏排版结果，必要时重算并同步 block 坐标。
+
+        Args:
+            width: 视口宽度（像素）。
+            height: 视口高度（像素）。
+
+        Returns:
+            缓存或新算出的 StepScreen。
+
+        Notes:
+            缓存键含 top，换屏时一定会重算；键里存的是 screen.top 而不是请求时的
+            _top，因为 _compute_screen 可能为了填满最后一屏反向夹过一次。
+        """
         key = (int(width), int(height), self._top)
         if self._screen is not None and self._screen_key == key:
             return self._screen
@@ -381,16 +556,29 @@ class StepRenderer:
         return screen
 
     def _font(self, px: int, bold: bool = False) -> Any:
+        """按 (像素字号, 是否加粗) 取字体；同一组合复用实例。
+
+        QFontMetrics 构造代价不低，而折行测量会反复用同一组字体。
+        """
         font = self._fonts.get((px, bold))
         if font is None:
             font = _make_font(px, bold)
             self._fonts[(px, bold)] = font
         return font
 
-    def _measure(self, content_w: int, font_px: int) -> list[tuple[list[tuple[int, int]], int, float]]:
+    def _measure(
+        self, content_w: int, font_px: int
+    ) -> list[tuple[list[tuple[int, int]], int, float]]:
         """每个句子的折行区间、行数、最大行宽（按内容宽度+字号缓存）。
 
         标题用粗体量、粗体画：量高与绘制必须同一字体，否则折行差一行就会画出半截。
+
+        Args:
+            content_w: 可用内容宽度（像素）。
+            font_px: 像素字号。
+
+        Returns:
+            与 units 等长的列表，每项为 (折行区间列表, 行数, 最大行宽)。
         """
         from PyQt6.QtGui import QFontMetrics
 
@@ -415,13 +603,29 @@ class StepRenderer:
         return rows
 
     def _compute_screen(self, width: int, height: int) -> StepScreen:
+        """算本屏放得下哪几句、用什么字号、句间留多大空隙。
+
+        Args:
+            width: 视口宽度（像素）。
+            height: 视口高度（像素）。
+
+        Returns:
+            StepScreen；无句子时返回 n=0 的空屏。
+
+        Notes:
+            外层"两遍"循环是为了处理最后一屏：算出的首句 + n 越过结尾时，把 top 反向
+            夹回重算一次，保证最后一屏装满而不是半屏。内层自减字号的循环只在
+            一分未放下时触发，触到 min_font_px 就停止并转为独占一屏。
+        """
         cfg = self.reading
         units = self.units
         margin_x = max(int(cfg.margin_x_vw * width), cfg.margin_x_min)
         content_w = max(width - 2 * margin_x, 160)
         avail = max(float(height) - 2 * cfg.margin_y, 80.0)
         if not units:
-            return StepScreen(0, 0, 0.0, 0.0, int(cfg.font_px), 0, content_w, margin_x, avail, [], [])
+            return StepScreen(
+                0, 0, 0.0, 0.0, int(cfg.font_px), 0, content_w, margin_x, avail, [], []
+            )
 
         self._top = min(max(self._top, 0), len(units) - 1)
         for _ in range(2):  # 第二遍：首句越界时夹紧后重算
@@ -461,6 +665,7 @@ class StepRenderer:
         # 独占一屏时顶部对齐：剩余高度是负的，居中的会把这句推出视口
         pad_top = float(cfg.margin_y) + (0.0 if solo else leftover / 2)
         if n > 1:
+            # 余量摊到句间空隙上，但不超过 max_gap_em：间隙过大就不再像"同一屏内容"
             max_gap = font_px * cfg.max_gap_em
             gap = min(gap_target + leftover / (n - 1), max_gap)
             content_h = used + (gap - gap_target) * (n - 1)
@@ -477,8 +682,23 @@ class StepRenderer:
         )
 
     # ---- 渲染 ------------------------------------------------------------
-    def render_viewport(self, x_offset: float, y_offset: float, width: int, height: int) -> np.ndarray:
-        """画当前这一屏；x/y 偏移按设计恒为 0（无全局滚动坐标）。"""
+    def render_viewport(
+        self, x_offset: float, y_offset: float, width: int, height: int
+    ) -> np.ndarray:
+        """画当前这一屏；x/y 偏移按设计恒为 0（无全局滚动坐标）。
+
+        Args:
+            x_offset: 恒为 0，保留是为了与 DocumentRenderer 保持签名一致。
+            y_offset: 恒为 0，同上。
+            width: 视口宽度（像素）。
+            height: 视口高度（像素）。
+
+        Returns:
+            RGB 三通道 uint8 数组，形状 (height, width, 3)。
+
+        Notes:
+            独占一屏时按 _solo_offset 做屏内滚动，其余情况下该偏移恒为 0。
+        """
         from PyQt6.QtCore import QRect, Qt
         from PyQt6.QtGui import QColor, QImage, QPainter
 
@@ -495,7 +715,10 @@ class StepRenderer:
             painter.setFont(self._font(screen.font_px, self.units[screen.top + k].heading))
             for li, line in enumerate(screen.lines[k]):
                 painter.drawText(
-                    QRect(screen.margin_x, int(y + li * screen.line_h), screen.content_w, screen.line_h),
+                    QRect(
+                        screen.margin_x, int(y + li * screen.line_h),
+                        screen.content_w, screen.line_h,
+                    ),
                     flags,
                     line,
                 )
@@ -505,7 +728,15 @@ class StepRenderer:
 
     # ---- 步进 ------------------------------------------------------------
     def step(self, delta: int) -> bool:
-        """向下/向上走一句；到顶、到底或超长句独占时返回 False。"""
+        """向下/向上走一句；到顶、到底或超长句独占时返回 False。
+
+        Args:
+            delta: >0 向下走一句，否则向上走一句。
+
+        Returns:
+            True 表示 top 已推进；False 表示到达边界或当前处于独占屏（兜底 dyPascal
+            由 solo_scroll 负责）。
+        """
         screen = self._screen
         units = self.units
         if screen is None or not units or screen.solo:
@@ -525,6 +756,12 @@ class StepRenderer:
         """超长句独占一屏时，滚轮先走它自己的内部滚动；到边界返回 False 交回整句步进。
 
         dy > 0 = 向下滚（内容上移）。
+
+        Args:
+            dy: 本次滚动位移（像素）。
+
+        Returns:
+            True 表示内部偏移有变化；False 表示已到该句的头或尾，调用方应改走 step。
         """
         screen = self._screen
         if screen is None or not screen.solo:
@@ -542,6 +779,9 @@ class StepRenderer:
 
         全部句子都要注册（而不是只注册可见的）：预翻译取的是 mapper.segments()，
         只注册可见的两三句会让整本书只预翻译首屏。
+
+        Args:
+            screen: 刚算出的本屏排版结果。
         """
         if self._mapper is None:
             return

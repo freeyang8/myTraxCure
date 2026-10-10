@@ -1,3 +1,15 @@
+"""模块名称：test_imports.py
+
+功能描述：冒烟式导入检查——逐个 import 所有模块并打印成败，用来在没有完整依赖的环境里
+快速分辨"装了什么"和"哪条 import 链断了"。既可作为 pytest 用例跑，也可直接执行去看清单。
+
+关键约束：
+- core 模块清单里的模块只允许依赖 numpy 与 eyetrax，因此它们失败就是真失败（计入退出码）；
+  依赖 PyQt6 的清单失败只算跳过，环境没装 UI 依赖不该算测试不过。
+- 文件必须先把项目根塞进 sys.path，否则从 tests/ 目录直接跑会找不到顶层包。
+- tests 目录被 .gitignore 忽略，本地专属脚本，不进版本库。
+"""
+
 from __future__ import annotations
 
 import importlib
@@ -53,6 +65,7 @@ QT_MODULES = [
 ]
 
 def _try_import(name: str) -> tuple[bool, str]:
+    """尝试导入一个模块，返回 (是否成功, 失败原因)；失败原因用于打印而非抛出。"""
     try:
         importlib.import_module(name)
         return True, ""
@@ -60,6 +73,12 @@ def _try_import(name: str) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 def run() -> int:
+    """逐项导入并打印清单。
+
+    Returns:
+        0 表示 core 清单全部导入成功，1 表示至少有一个失败；
+        Qt 清单的失败不影响返回值。
+    """
     # 控制台可能是 GBK，强制 UTF-8 输出，避免打印标记时崩
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -87,6 +106,7 @@ def run() -> int:
     return 1 if failed else 0
 
 def test_core_imports() -> None:
+    """pytest 入口：core 清单里任一模块导入失败即整体失败。"""
     for name in CORE_MODULES:
         importlib.import_module(name)
 

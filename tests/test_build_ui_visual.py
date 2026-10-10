@@ -1,8 +1,15 @@
-"""构建期 UI 视觉验证：真实链路演示 + 三层结构断言。
+"""模块名称：test_build_ui_visual.py
 
-演示不再猴补丁主链路：mock 文档写成临时 .txt 走真实 FileParser → DocumentRenderer，
-凝视走真实 MainWindow.on_gaze_point（含驻留判定/段落聚合/容差命中），
-翻译走真实 TranslationWorker + 缓存 + 浮层，只把引擎换成本地 MockEngine（不连 Ollama）。
+功能描述：构建期的 UI 视觉验证——走完整真实链路（FileParser → DocumentRenderer →
+MainWindow.on_gaze_point → TranslationWorker → 缓存 → 浮层），同时断言"三层视图结构"
+成立，并顺带产出几张分层截图供肉眼核对。
+
+关键约束：
+- 演示部分不再给主链路打补丁：mock 文档写成临时 .txt 走真实解析器与渲染器，
+  凝视走真实的驻留判定 / 段落聚合 / 容差命中，只把翻译引擎换成本地 MockEngine
+  （不连 Ollama）。这样"链路能跑通"这件事才有说服力。
+- 需要 Qt 环境；窗口相关的断言依赖真实几何，改视口尺寸会让期望值失效。
+- tests 目录被 .gitignore 忽略，本地专属脚本，不进版本库。
 """
 
 from __future__ import annotations
@@ -61,6 +68,7 @@ class MockEngine(TranslationEngine):
         )
 
 def _mock_document_path() -> Path:
+    """把 mock 文档写成本机临时 .txt，好让它过一遍真实的解析链路。"""
     path = Path(tempfile.gettempdir()) / "mytraxcure_ui_demo.txt"
     path.write_text("\n".join(MOCK_DOC_LINES), encoding="utf-8")
     return path
@@ -110,6 +118,7 @@ def _feed_gaze(window: MainWindow, doc_point, ticks: int = 24, interval_ms: int 
 
 # ---- 实时交互演示 ---------------------------------------------------------
 def run_interactive() -> int:
+    """打开真实窗口让人手动操作一遍，返回事件循环的退出码。"""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # noqa: S110 - 控制台不支持 UTF-8 时静默跳过
@@ -129,6 +138,7 @@ def run_interactive() -> int:
 
 # ---- 截图模式（--shots）---------------------------------------------------
 def run_shots() -> int:
+    """按固定时序连拍五张分层截图（viewer → 高亮 → loading → 译文），无人工干预。"""
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # noqa: S110 - 控制台不支持 UTF-8 时静默跳过
@@ -141,26 +151,31 @@ def run_shots() -> int:
     out_dir = Path(__file__).resolve().parent / "output"
 
     def step1_viewer_only() -> None:
+        """先出一张纯正文图：顺带让首帧完成 TXT 的 bbox 回填。"""
         # 首帧渲染会回填 TXT 的 bbox 并重新注册文本块，必须先让它画过一次
         _capture(window, out_dir / "build_ui_1_viewer.png")
         window._gaze_timer.stop()  # 改由脚本喂凝视点
         QTimer.singleShot(300, step2_feedback)
 
     def step2_feedback() -> None:
+        """喂凝视点到触发驻留，产出带高亮框的一层。"""
         _feed_gaze(window, _gaze_target_doc_point(window))
         QTimer.singleShot(1200, step3_loading)  # 24×40ms 喂点 + 驻留判定
 
     def step3_loading() -> None:
+        """按空格走真实按键链路，进入 loading 态。"""
         assert window._locked_region is not None, "凝视驻留未触发锁定（看 step2）"
         _capture(window, out_dir / "build_ui_2_feedback.png")
         window.on_space()  # 真实按键链路 → show_loading
         QTimer.singleShot(250, step4_loading_shot)
 
     def step4_loading_shot() -> None:
+        """趁 mock 引擎还没返回，抓一张"翻译中…"的浮层。"""
         _capture(window, out_dir / "build_ui_3_overlay.png")
         QTimer.singleShot(900, step5_translated)  # mock 引擎 0.7s 后信号回来
 
     def step5_translated() -> None:
+        """抓最终译文态，然后退出事件循环。"""
         _capture(window, out_dir / "build_ui_4_translated.png")
         QTimer.singleShot(200, app.quit)
 
@@ -168,12 +183,14 @@ def run_shots() -> int:
     return app.exec()
 
 def _capture(window: MainWindow, path: Path) -> None:
+    """把整个窗口抓成 PNG 存到指定路径（父目录按需创建）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     window.grab().save(str(path))
     print(f"  [saved] {path}")
 
 # ---- pytest 入口：断言 _build_ui 装配出的三层结构（不起事件循环）----------
 def test_build_ui_layer_structure() -> None:
+    """断言三层装配：文档栈在中央容器上，浮层与高亮都挂在 viewer 下且对鼠标透明。"""
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841 - 保持 QApplication 引用防止被回收
     window = MainWindow(AppConfig())
 

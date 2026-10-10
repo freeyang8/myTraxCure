@@ -1,3 +1,16 @@
+"""模块名称：test_file_parser_pdf.py
+
+功能描述：拿一份真实 PDF 跑一轮 FileParser._parse_pdf，把每页的文本块连同坐标打印出来，
+并对"容易静默出错"的产出做核对：坐标是否落在页面范围内、block_id/para_key 是否为空、
+source 是否为 PDF、文档是否既没文本块也没被标成扫描页。
+
+关键约束：
+- PDF_PATH 写死的是本机路径，换环境必须改这里或改用命令行传参（传参优先）。
+- 这是数据驱动的校验而非纯粹单元测试：结论依赖被解析的那份 PDF，
+  换一份文件跑通不代表另一份也通。
+- tests 目录被 .gitignore 忽略，本地专属脚本，不进版本库。
+"""
+
 from __future__ import annotations
 
 import sys
@@ -15,6 +28,14 @@ PDF_PATH = Path(r"E:\Download\IDMDownloads\fiz_test_pdf.pdf")
 MAX_BLOCKS_PER_PAGE = 20
 
 def parse_pdf_and_report(pdf_path: Path) -> tuple[ParsedDocument, list[str]]:
+    """解析一份 PDF 并收集全部可疑之处。
+
+    Args:
+        pdf_path: PDF 文件路径。
+
+    Returns:
+        (解析结果, 问题描述列表)；列表为空即未发现问题。
+    """
     problems: list[str] = []
 
     doc = FileParser()._parse_pdf(pdf_path)
@@ -66,6 +87,7 @@ def parse_pdf_and_report(pdf_path: Path) -> tuple[ParsedDocument, list[str]]:
     return doc, problems
 
 def test_parse_pdf() -> None:
+    """pytest 入口：默认 PDF 必须存在且解析无问题；问题描述会作为断言消息整体抛出。"""
     assert PDF_PATH.exists(), f"PDF 不存在：{PDF_PATH}"
     _, problems = parse_pdf_and_report(PDF_PATH)
     assert not problems, "\n".join(problems)

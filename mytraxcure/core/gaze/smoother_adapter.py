@@ -1,3 +1,14 @@
+"""模块名称：smoother_adapter.py
+
+功能描述：凝视点平滑。固定 kalman_ema 一种算法（卡尔曼预测 + EMA 二次平滑），
+并提供 5 点噪声微调：采集各注视点内的预测抖动，估出测量噪声协方差 R 写回卡尔曼。
+
+关键约束：
+- 微调要独占摄像头、并开一个 cv2 全屏窗口，因此必须在 CameraThread 启动之前跑，
+  否则 open_camera 会失败；窗口尺寸取 primary_screen_size()，与校准同一坐标系。
+- 平滑输出仍是主屏物理像素，Qt 侧的 DPI 换算由 UI 负责，这里不做。
+"""
+
 from __future__ import annotations
 
 import math
@@ -32,10 +43,17 @@ def _tune_points(sw: int, sh: int) -> list[tuple[int, int]]:
 def _jitter_covariance(per_point_samples: list[list[list[float]]]) -> np.ndarray | None:
     """每点各自算方差再平均 → 测量噪声协方差（对角）。
 
-    只统计"同一注视点内 predict 的波动"，所以不含注视点之间的间距：
-    若把所有点混起来算方差，量级会被屏幕布局主导（全屏布局下约 7e5），卡尔曼被迫重度平滑
-    （实测阶跃到 90% 要 11 帧，而同点抖动对应的 R 只要 2~4 帧）。
-    少于 2 帧的点算不出方差，跳过；全都不足返回 None。
+    Args:
+        per_point_samples: 各注视点采到的 [x, y] 列表。
+
+    Returns:
+        2x2 float32 对角协方差；所有点都不足 2 帧时返回 None。
+
+    Notes:
+        只统计"同一注视点内 predict 的波动"，所以不含注视点之间的间距：
+        若把所有点混起来算方差，量级会被屏幕布局主导（全屏布局下约 7e5），卡尔曼被迫重度平滑
+        （实测阶跃到 90% 要 11 帧，而同点抖动对应的 R 只要 2~4 帧）。
+        少于 2 帧的点算不出方差，跳过。
     """
     per_point_vars = [
         np.var(np.asarray(samples, dtype=float), axis=0)
@@ -50,11 +68,20 @@ def _jitter_covariance(per_point_samples: list[list[list[float]]]) -> np.ndarray
 
 
 def tune_noise(gaze_estimator, camera_index: int = 0) -> np.ndarray | None:
-    """收集各注视点附近 predict 的抖动，返回测量噪声协方差（同点内抖动）；None = 取消/样本不足。
+    """收集各注视点附近 predict 的抖动，返回测量噪声协方差（同点内抖动）。
 
-    流程与 eyetrax 的 KalmanSmoother.tune() 相同：5 个绿点同时显示，视线进入某点
-    命中半径后等 _TUNE_INITIAL_DELAY_S 稳定，再采集 _TUNE_COLLECT_S；点采够即消失。
-    ESC 直接放弃（不写噪声协方差）。
+    Args:
+        gaze_estimator: 已载入校准模型的 eyetrax GazeEstimator，未训练时预测结果无意义。
+        camera_index: 摄像头序号。
+
+    Returns:
+        2x2 测量噪声协方差；ESC 取消或有效样本不足时返回 None。
+
+    Notes:
+        流程与 eyetrax 的 KalmanSmoother.tune() 相同：5 个绿点同时显示，视线进入某点
+        命中半径后等 _TUNE_INITIAL_DELAY_S 稳定，再采集 _TUNE_COLLECT_S；点采够即消失。
+        ESC 直接放弃（不写噪声协方差，已采到的部分样本一并丢弃）。
+        会开全屏 cv2 窗口并独占摄像头，调用前需确保 CameraThread 尚未启动。
     """
     sw, sh = primary_screen_size()
     proximity = sw * _TUNE_PROXIMITY_RATIO
@@ -89,6 +116,7 @@ def tune_noise(gaze_estimator, camera_index: int = 0) -> np.ndarray | None:
                 gx, gy = map(int, gaze_estimator.predict(np.array([features]))[0])
                 cv2.circle(canvas, (gx, gy), 10, (255, 0, 0), -1)
 
+                # 遍历副本：采够的点会在循环体内从 states 里移除
                 for st in states[:]:
                     px, py = st["pos"]
                     if math.hypot(gx - px, gy - py) > proximity:
@@ -106,6 +134,7 @@ def tune_noise(gaze_estimator, camera_index: int = 0) -> np.ndarray | None:
                     data_elapsed = now - st["collect_start"]
                     st["samples"].append([gx, gy])
                     progress = data_elapsed / _TUNE_COLLECT_S if _TUNE_COLLECT_S > 0 else 1.0
+                    # 采集中让点越抖越大：给用户"这个点正在采集"的视觉反馈
                     shake = int(5 + progress * 20)
                     cv2.circle(
                         canvas,
@@ -128,34 +157,57 @@ def tune_noise(gaze_estimator, camera_index: int = 0) -> np.ndarray | None:
 
 
 class SmootherAdapter:
-    """凝视点平滑：固定 kalman_ema（卡尔曼预测 + EMA 二次平滑），不提供算法切换。"""
+    """凝视点平滑：固定 kalman_ema（卡尔曼预测 + EMA 二次平滑），不提供算法切换。
+
+    生命周期：构造即建滤波器 → tune() 写入实测噪声协方差 → reset() 重建滤波器，
+    但会把已 tuning 的 R 恢复回去（_tuned_r），因此重置不会丢掉微调结果。
+    """
 
     def __init__(self, ema_alpha: float = 0.25) -> None:
+        """Args: ema_alpha: EMA 强度，越大越平滑但越滞后（见 set_ema_alpha 的方向说明）。"""
         self.ema_alpha = ema_alpha
         self._tuned_r: Any = None
         self._smoother: KalmanEMASmoother = self._build()
 
     def _build(self) -> KalmanEMASmoother:
+        """按当前 ema_alpha 新建一个滤波器（卡尔曼状态与 EMA 历史都从零开始）。"""
         return KalmanEMASmoother(make_kalman(), ema_alpha=self.ema_alpha)
 
     def step(self, x: float, y: float) -> tuple[float, float]:
+        """喂入一帧原始预测坐标，返回平滑后的坐标（仍是主屏物理像素）。"""
         return self._smoother.step(x, y)
 
     def set_ema_alpha(self, alpha: float) -> None:
         """运行时改平滑强度，不重建滤波器（保留卡尔曼状态与已 tuning 的噪声协方差）。
 
-        注意 eyetrax 的方向：out = a*prev + (1-a)*new，a 越大越平滑但越滞后。
+        Args:
+            alpha: 新的 EMA 系数，取值 0~1。
+
+        Notes:
+            注意 eyetrax 的方向：out = a*prev + (1-a)*new，a 越大越平滑但越滞后。
         """
         self.ema_alpha = float(alpha)
         self._smoother.ema_alpha = float(alpha)
 
     def reset(self) -> None:
+        """重建滤波器（卡尔曼状态与 EMA 历史清零）；已 tuning 的噪声协方差会被恢复。"""
         self._smoother = self._build()
         if self._tuned_r is not None:
             self._smoother.kf.measurementNoiseCov = self._tuned_r.copy()
 
     def tune(self, gaze_estimator, camera_index: int = 0) -> bool:
-        """5 点噪声微调。返回 False = 被 ESC 取消或样本不足，滤波器参数保持不变。"""
+        """5 点噪声微调，把实测抖动方差写进卡尔曼的测量噪声协方差。
+
+        Args:
+            gaze_estimator: 已载入校准模型的 eyetrax GazeEstimator。
+            camera_index: 摄像头序号。
+
+        Returns:
+            True 已写入；False 被 ESC 取消或样本不足，此时滤波器参数保持不变。
+
+        Notes:
+            需独占摄像头并开全屏 cv2 窗口，调用前确保 CameraThread 尚未启动。
+        """
         tuned_r = tune_noise(gaze_estimator, camera_index=camera_index)
         if tuned_r is None:
             return False

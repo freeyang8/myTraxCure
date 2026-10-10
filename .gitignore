@@ -44,3 +44,8 @@ _dump_project_to_txt.py
 毕业项目需求v6.md
 tests/
 .gitignore
+# 工作区 AI 记忆与本地清单，不上传
+.workbuddy/
+.workbuddy-ai/
+未实现与待办清单.md
+注释重写交接清单.md

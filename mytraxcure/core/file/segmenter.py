@@ -1,14 +1,17 @@
-"""文档内容的语义切分与阅读顺序归一化。
+"""模块名称：segmenter.py
 
-各解析器给出的 block 顺序只保证"各格式自己的遍历顺序"（PDF 是 PyMuPDF 块序、
-TXT 是行序、Word 是段落序），跨页/多栏时并不保证是阅读顺序。重排渲染器直接信任
-本模块的输出顺序，因此这里统一做三件事：
+功能描述：把解析产物的 block 序列归一成阅读顺序并完成段落归组，是所有下游 Coordinate
+计算的共同前提。在同一个 traversal 里做三件事：按阅读顺序排序、PDF 段落按几何二次切分、
+把 para_key 重编为全文档连续的 seg{n}，同时产出段落文本与每块的字符区间。
 
-1. 按阅读顺序排序（page → y → x；(y,x) 兜底，不做多栏检测）；
-2. PDF 段落按几何二次切分（PyMuPDF 常把"标题 + 正文"并进同一个 block）；
-3. 重编 para_key 为全文档连续的 seg{n}，并把 block 归到重排后的同一逻辑页。
-
-TXT（空行分段）与 Word（段落对象）的段落粒度本来就是对的，不做二次切分。
+关键约束：
+- 各解析器给出的 block 顺序只保证"各格式自己的遍历顺序"（PDF 是 PyMuPDF 块序、
+  TXT 是行序、Word 是段落序），跨页/多栏时并不保证是阅读顺序。重排渲染器直接信任
+  本模块的输出顺序，排序规则的任何改动都会同时影响排版、命中与预翻译排队。
+- 注意区分两种"排序"入口：本模块的 segment_blocks 是按几何排序（用于实际排版），
+  TextMapper 侧另有纯 block_id 的兜底排序；两者规则不同，不能互相替换。
+- TXT（空行分段）与 Word（段落对象）的段落粒度本来就是对的，不做二次切分；
+  只有 PDF 会因为 PyMuPDF 把"标题 + 正文"并进同一个 block 而需要按几何再切。
 """
 
 from __future__ import annotations
@@ -66,8 +69,16 @@ def segment_blocks(blocks: list[TextBlock]) -> list[TextBlock]:
 def group_paragraphs(blocks: list[TextBlock]) -> list[tuple[str, list[TextBlock]]]:
     """把已按阅读顺序排好的 block 归成段落，返回 (para_key, 段内 blocks)。
 
-    同一段的 block 一定相邻——重排渲染是按段连续排版的，段内被别段插开就会
-    渲染成两截，段落并集 bbox 也会横跨别的段。
+    Args:
+        blocks: 已排好阅读顺序的文本块。
+
+    Returns:
+        段落列表，顺序与输入一致。para_key 取自每段首块，段 boundaries 由
+        _same_paragraph 决定。
+
+    Notes:
+        同一段的 block 一定相邻——重排渲染是按段连续排版的，段内被别段插开就会
+        渲染成两截，段落并集 bbox 也会横跨别的段。
     """
     groups: list[tuple[str, list[TextBlock]]] = []
     for b in blocks:
@@ -79,6 +90,21 @@ def group_paragraphs(blocks: list[TextBlock]) -> list[tuple[str, list[TextBlock]
 
 
 def _same_paragraph(prev: TextBlock, cur: TextBlock) -> bool:
+    """判断相邻两块是否仍属同一段落。
+
+    Args:
+        prev: 阅读顺序上的前一块。
+        cur: 紧跟其后的一块。
+
+    Returns:
+        True 表示两块归为同一段。
+
+    Notes:
+        仅对 PDF 做二次切分。判定用的是行∈块的纵向重叠与行间距两条几何规则，
+        阈值取"半个行高"与"一个行高"的原文行高比例而非绝对值：同一份 PDF 里标题
+        与正文的行高能差一倍，用绝对像素会在任一字号上失效。
+        坐标尚未回填（h ≤ 0）时保持解析器的判定，避免拿到假换行。
+    """
     if prev.para_key != cur.para_key:
         return False  # 解析器已判定换段
     if prev.source != "PDF" or cur.source != "PDF":
@@ -123,9 +149,12 @@ def paragraph_text_with_spans(
     pos = 0
     prev_line: str | None = None
     for index, b in enumerate(blocks):
+        # 提示块与空白块不参与翻译，也不该让段落文本多出内容
         if b.source == NOTICE_SOURCE or not b.text.strip():
             continue
         lid = line_id(b, index)
+        # 只有真的换视觉行才补空格：同一行的多个 span 直接相连，
+        # 否则 "Hel" + "lo" 会被拼成 "Hel lo"
         if parts and lid != prev_line:
             parts.append(" ")
             pos += 1
@@ -143,7 +172,19 @@ def paragraph_text(blocks: list[TextBlock]) -> str:
 
 
 def make_ocr_notices(needs_ocr_pages: list[int]) -> list[TextBlock]:
-    """无文本层（扫描页）的占位提示块：重排视图里照样占一行，避免静默丢内容。"""
+    """无文本层（扫描页）的占位提示块：重排视图里照样占一行，避免静默丢内容。
+
+    Args:
+        needs_ocr_pages: 无文本层的页码（0 基），来自 ParsedDocument.meta。
+            重复项会被去重，页码在文案里再转回 1 基展示。
+
+    Returns:
+        每个扫描页一个 TextBlock，source 为 NOTICE_SOURCE，按页码升序。
+
+    Notes:
+        提示块的 text 是它自己的整句，因此取 current_text 时用的是 blocks[0].text
+        而不是拼接结果——见 file_viewer 里 _fill_blocks 的分支。
+    """
     return [
         TextBlock(
             text=f"【第 {int(p) + 1} 页为扫描页：无文本层，无法翻译】",
